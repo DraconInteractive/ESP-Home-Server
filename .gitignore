@@ -24,6 +24,11 @@ button-node-firmware/managed_components/
 button-node-firmware/dependencies.lock
 button-node-firmware/sdkconfig
 button-node-firmware/sdkconfig.old
+esp-eye-firmware/build/
+esp-eye-firmware/managed_components/
+esp-eye-firmware/dependencies.lock
+esp-eye-firmware/sdkconfig
+esp-eye-firmware/sdkconfig.old
 
 # Python generated files
 __pycache__/

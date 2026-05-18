@@ -13,6 +13,8 @@ server that forwards spoken commands to transcription.
   forwards it to ElevenLabs Speech to Text.
 - `button-node-firmware/`: ESP-IDF project for a Seeed XIAO ESP32-C3 button
   node. It registers with the server and posts click events from D10/GPIO10.
+- `esp-eye-firmware/`: ESP-IDF project for an ESP-EYE v2.1. Current milestone
+  is Wi-Fi registration with camera and microphone capabilities advertised.
 
 ## Current Flow
 

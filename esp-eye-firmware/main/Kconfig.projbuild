@@ -1,0 +1,28 @@
+menu "ESP-EYE Registration"
+
+config ESP_EYE_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Wi-Fi network SSID for the ESP-EYE.
+
+config ESP_EYE_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Wi-Fi network password. Leave empty for an open network.
+
+config ESP_EYE_COMMAND_SERVER_URL
+    string "Command server base URL"
+    default "http://192.168.4.20:8080"
+    help
+        Base URL for the local command server.
+
+config ESP_EYE_REGISTER_INTERVAL_SECONDS
+    int "Registration refresh interval seconds"
+    default 30
+    range 5 3600
+    help
+        How often the ESP-EYE refreshes its server registration.
+
+endmenu
