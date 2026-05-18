@@ -11,6 +11,8 @@ server that forwards spoken commands to transcription.
   transcript display.
 - `server/`: Python local HTTP server that receives audio from the board and
   forwards it to ElevenLabs Speech to Text.
+- `button-node-firmware/`: ESP-IDF project for a Seeed XIAO ESP32-C3 button
+  node. It registers with the server and posts click events from D10/GPIO10.
 
 ## Current Flow
 

@@ -19,6 +19,11 @@ camera-firmware/build/
 camera-firmware/managed_components/
 camera-firmware/sdkconfig
 camera-firmware/sdkconfig.old
+button-node-firmware/build/
+button-node-firmware/managed_components/
+button-node-firmware/dependencies.lock
+button-node-firmware/sdkconfig
+button-node-firmware/sdkconfig.old
 
 # Python generated files
 __pycache__/

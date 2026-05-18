@@ -33,6 +33,7 @@ DEVICE_STALE_SECONDS = int(os.environ.get("COMMAND_SERVER_DEVICE_STALE_SECONDS",
 DEVICE_PING_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_DEVICE_PING_TIMEOUT_SECONDS", "2.0"))
 
 RECENT_COMMANDS: list[dict[str, Any]] = []
+RECENT_BUTTON_EVENTS: list[dict[str, Any]] = []
 MUTED_DEVICES: dict[str, bool] = {}
 GLOBAL_MUTED = False
 PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
@@ -332,6 +333,38 @@ def remove_device(device_id: str) -> None:
     DEVICE_EVENTS.pop(device_id, None)
     MUTED_DEVICES.pop(device_id, None)
     PENDING_ACTIONS.pop(device_id, None)
+
+
+def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None) -> dict[str, Any]:
+    touch_device(device_id, handler)
+    event = {
+        "device_id": device_id,
+        "received_at": int(time.time()),
+        "event": str(payload.get("event", "click"))[:32],
+        "button": str(payload.get("button", "button"))[:32],
+        "gpio": payload.get("gpio"),
+        "active_low": payload.get("active_low"),
+        "click_count": payload.get("click_count"),
+        "uptime_ms": payload.get("uptime_ms"),
+        "remote_addr": DEVICES.get(device_id, {}).get("remote_addr"),
+    }
+    RECENT_BUTTON_EVENTS.append(event)
+    del RECENT_BUTTON_EVENTS[:-100]
+
+    device = DEVICES.get(device_id, {})
+    status = dict(device.get("status", {})) if isinstance(device.get("status"), dict) else {}
+    status["last_button_event"] = event["event"]
+    status["last_button"] = event["button"]
+    if isinstance(event["click_count"], (int, float)):
+        status["click_count"] = event["click_count"]
+    device["status"] = status
+
+    print(
+        "Button event: "
+        f"device={device_id} button={event['button']} event={event['event']} "
+        f"count={event['click_count']} gpio={event['gpio']} remote={event['remote_addr']}"
+    )
+    return event
 
 
 def enqueue_device_event(device_id: str, event_type: str, display_text: str, tone: str = "success",
@@ -874,6 +907,21 @@ class CommandHandler(BaseHTTPRequestHandler):
                 commands = commands[-limit:]
             json_response(self, 200, {"commands": commands})
             return
+        if parsed.path == "/button-events/recent":
+            device_filter = query.get("device_id", [None])[0]
+            limit_text = query.get("limit", ["20"])[0]
+            try:
+                limit = max(1, min(int(limit_text), 100))
+            except ValueError:
+                limit = 20
+            with STATE_LOCK:
+                events = RECENT_BUTTON_EVENTS
+                if device_filter:
+                    device_filter = clean_device_id(device_filter)
+                    events = [event for event in events if event.get("device_id") == device_filter]
+                events = events[-limit:]
+            json_response(self, 200, {"button_events": events})
+            return
         json_response(self, 404, {"error": "not found"})
 
     def do_POST(self) -> None:
@@ -903,6 +951,20 @@ class CommandHandler(BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     device = register_device(device_id, payload, self)
                 json_response(self, 200, {"ok": True, "device": device})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path.startswith("/devices/") and parsed.path.endswith("/button"):
+            device_id = clean_device_id(parsed.path.removeprefix("/devices/").removesuffix("/button"))
+            try:
+                body = read_request_body(self)
+                payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("button event body must be a JSON object")
+                with STATE_LOCK:
+                    event = record_button_event(device_id, payload, self)
+                json_response(self, 200, {"ok": True, "device_id": device_id, "button_event": event})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
