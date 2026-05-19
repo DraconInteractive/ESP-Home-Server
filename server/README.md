@@ -15,6 +15,8 @@ The server listens on `0.0.0.0:8080` by default.
 
 ## Endpoints
 
+- `GET /` or `GET /dashboard` opens the local device dashboard.
+- `GET /dashboard-data` returns the dashboard snapshot used by the UI.
 - `GET /health` returns a basic health check.
 - `GET /devices` returns known devices and their server-side state.
 - `GET /devices/{device_id}` returns one known device.

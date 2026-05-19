@@ -31,6 +31,7 @@ MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "scribe_v2")
 MAX_AUDIO_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_AUDIO_BYTES", str(4 * 1024 * 1024)))
 DEVICE_STALE_SECONDS = int(os.environ.get("COMMAND_SERVER_DEVICE_STALE_SECONDS", "45"))
 DEVICE_PING_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_DEVICE_PING_TIMEOUT_SECONDS", "2.0"))
+SERVER_STARTED_AT = int(time.time())
 
 RECENT_COMMANDS: list[dict[str, Any]] = []
 RECENT_BUTTON_EVENTS: list[dict[str, Any]] = []
@@ -57,6 +58,15 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[st
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def html_response(handler: BaseHTTPRequestHandler, status: int, body: str) -> None:
+    encoded = body.encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(encoded)))
+    handler.end_headers()
+    handler.wfile.write(encoded)
 
 
 def read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
@@ -325,6 +335,59 @@ def ping_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]:
         "online": online,
         "method": method,
         "detail": detail,
+    }
+
+
+def dashboard_device(device_id: str) -> dict[str, Any]:
+    public = public_device(device_id)
+    raw = DEVICES.get(device_id, {})
+    online, detail = recent_device_online(raw)
+    last_seen = public.get("last_seen")
+    age_seconds = None
+    if isinstance(last_seen, (int, float)):
+        age_seconds = max(0, int(time.time() - last_seen))
+    public["online"] = online
+    public["online_detail"] = detail
+    public["age_seconds"] = age_seconds
+    public["ip"] = device_ip(raw)
+    public["display_name"] = device_display_name(device_id, raw)
+    return public
+
+
+def dashboard_snapshot() -> dict[str, Any]:
+    devices = [dashboard_device(device_id) for device_id in sorted(DEVICES)]
+    online_count = sum(1 for device in devices if device.get("online"))
+    device_types: dict[str, int] = {}
+    capability_counts: dict[str, int] = {}
+    for device in devices:
+        device_type = str(device.get("type", "unknown"))
+        device_types[device_type] = device_types.get(device_type, 0) + 1
+        for capability in device.get("capabilities", []):
+            key = str(capability)
+            capability_counts[key] = capability_counts.get(key, 0) + 1
+
+    return {
+        "server": {
+            "host": HOST,
+            "port": PORT,
+            "started_at": SERVER_STARTED_AT,
+            "uptime_seconds": int(time.time() - SERVER_STARTED_AT),
+            "global_muted": GLOBAL_MUTED,
+            "device_stale_seconds": DEVICE_STALE_SECONDS,
+        },
+        "summary": {
+            "device_count": len(devices),
+            "online_count": online_count,
+            "offline_count": len(devices) - online_count,
+            "pending_event_count": sum(int(device.get("pending_events", 0)) for device in devices),
+            "recent_command_count": len(RECENT_COMMANDS),
+            "recent_button_event_count": len(RECENT_BUTTON_EVENTS),
+            "device_types": device_types,
+            "capabilities": capability_counts,
+        },
+        "devices": devices,
+        "recent_commands": RECENT_COMMANDS[-20:],
+        "recent_button_events": RECENT_BUTTON_EVENTS[-20:],
     }
 
 
@@ -824,6 +887,439 @@ COMMANDS: tuple[Command, ...] = (
 )
 
 
+DASHBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Device Dashboard</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #18202a;
+      --muted: #687383;
+      --line: #dce2ea;
+      --good: #167a46;
+      --bad: #b42318;
+      --warn: #9a6700;
+      --accent: #2458a6;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111418;
+        --panel: #1a1f26;
+        --text: #edf1f7;
+        --muted: #9aa5b5;
+        --line: #303946;
+        --good: #4ec98a;
+        --bad: #ff7b72;
+        --warn: #d9a441;
+        --accent: #78a8ff;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 650;
+    }
+    main {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+    button {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      height: 34px;
+      padding: 0 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .stat, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .stat {
+      padding: 14px;
+      min-height: 82px;
+    }
+    .stat .label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    .stat .value {
+      display: block;
+      margin-top: 6px;
+      font-size: 26px;
+      font-weight: 700;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 18px;
+      align-items: start;
+    }
+    .panel {
+      overflow: hidden;
+    }
+    .panel h2 {
+      margin: 0;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      font-size: 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      text-transform: uppercase;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .device-id {
+      font-weight: 650;
+      word-break: break-word;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 3px;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--bad);
+    }
+    .online .dot { background: var(--good); }
+    .chips {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .links {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    a:hover { text-decoration: underline; }
+    .events {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+    }
+    .event {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .empty {
+      padding: 18px;
+      color: var(--muted);
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      word-break: break-word;
+    }
+    @media (max-width: 900px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .grid { grid-template-columns: 1fr; }
+      table, thead, tbody, th, td, tr { display: block; }
+      thead { display: none; }
+      tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
+      td { border-bottom: 0; padding: 6px 12px; }
+      td::before {
+        content: attr(data-label);
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+        margin-bottom: 2px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Device Dashboard</h1>
+      <div class="meta" id="serverMeta">Loading server state</div>
+    </div>
+    <div class="toolbar">
+      <span id="refreshState">Waiting for first refresh</span>
+      <button id="refreshButton" type="button">Refresh</button>
+    </div>
+  </header>
+  <main>
+    <section class="stats" id="stats"></section>
+    <section class="grid">
+      <div class="panel">
+        <h2>Devices</h2>
+        <div id="devices"></div>
+      </div>
+      <div>
+        <div class="panel">
+          <h2>Recent Commands</h2>
+          <div class="events" id="commands"></div>
+        </div>
+        <div style="height:18px"></div>
+        <div class="panel">
+          <h2>Button Events</h2>
+          <div class="events" id="buttonEvents"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const state = {
+      refreshMs: 5000,
+      timer: null,
+    };
+
+    function text(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      return String(value);
+    }
+
+    function age(value) {
+      if (value === null || value === undefined) return "-";
+      if (value < 60) return `${value}s ago`;
+      if (value < 3600) return `${Math.floor(value / 60)}m ago`;
+      return `${Math.floor(value / 3600)}h ago`;
+    }
+
+    function uptime(seconds) {
+      if (!Number.isFinite(seconds)) return "-";
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      if (h) return `${h}h ${m}m`;
+      if (m) return `${m}m ${s}s`;
+      return `${s}s`;
+    }
+
+    function el(tag, className, content) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (content !== undefined) node.textContent = content;
+      return node;
+    }
+
+    function renderStats(data) {
+      const stats = document.getElementById("stats");
+      stats.replaceChildren();
+      const items = [
+        ["Devices", data.summary.device_count],
+        ["Online", data.summary.online_count],
+        ["Offline", data.summary.offline_count],
+        ["Pending Events", data.summary.pending_event_count],
+        ["Commands", data.summary.recent_command_count],
+        ["Buttons", data.summary.recent_button_event_count],
+      ];
+      for (const [label, value] of items) {
+        const card = el("div", "stat");
+        card.append(el("div", "label", label));
+        card.append(el("span", "value", value));
+        stats.append(card);
+      }
+    }
+
+    function endpointLinks(endpoints) {
+      const wrap = el("div", "links");
+      const entries = Object.entries(endpoints || {});
+      if (!entries.length) {
+        wrap.append(el("span", "meta", "-"));
+        return wrap;
+      }
+      for (const [name, url] of entries) {
+        const link = el("a", "", name);
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        wrap.append(link);
+      }
+      return wrap;
+    }
+
+    function chips(items) {
+      const wrap = el("div", "chips");
+      if (!items || !items.length) {
+        wrap.append(el("span", "meta", "-"));
+        return wrap;
+      }
+      for (const item of items) wrap.append(el("span", "chip", item));
+      return wrap;
+    }
+
+    function renderDevices(devices) {
+      const root = document.getElementById("devices");
+      root.replaceChildren();
+      if (!devices.length) {
+        root.append(el("div", "empty", "No devices have registered yet."));
+        return;
+      }
+      const table = el("table");
+      const thead = document.createElement("thead");
+      thead.innerHTML = "<tr><th>Device</th><th>Status</th><th>Type</th><th>Capabilities</th><th>Endpoints</th><th>Last Result</th></tr>";
+      const tbody = document.createElement("tbody");
+      for (const device of devices) {
+        const tr = document.createElement("tr");
+        const tdDevice = document.createElement("td");
+        tdDevice.dataset.label = "Device";
+        tdDevice.append(el("div", "device-id", device.id));
+        tdDevice.append(el("div", "meta", `${text(device.display_name)} | ${text(device.ip)}`));
+
+        const tdStatus = document.createElement("td");
+        tdStatus.dataset.label = "Status";
+        const status = el("span", `status ${device.online ? "online" : ""}`);
+        status.append(el("span", "dot"));
+        status.append(el("span", "", device.online ? "Online" : "Offline"));
+        tdStatus.append(status);
+        tdStatus.append(el("div", "meta", `${text(device.online_detail)} | ${age(device.age_seconds)}`));
+        if (device.muted) tdStatus.append(el("div", "meta", "Muted"));
+        if (device.pending_events) tdStatus.append(el("div", "meta", `${device.pending_events} event(s) queued`));
+
+        const tdType = document.createElement("td");
+        tdType.dataset.label = "Type";
+        tdType.textContent = text(device.type);
+        tdType.append(el("div", "meta", text(device.model)));
+
+        const tdCaps = document.createElement("td");
+        tdCaps.dataset.label = "Capabilities";
+        tdCaps.append(chips(device.capabilities));
+
+        const tdEndpoints = document.createElement("td");
+        tdEndpoints.dataset.label = "Endpoints";
+        tdEndpoints.append(endpointLinks(device.endpoints));
+
+        const tdLast = document.createElement("td");
+        tdLast.dataset.label = "Last Result";
+        tdLast.append(el("div", "", text(device.last_command)));
+        tdLast.append(el("div", "meta", text(device.last_display_text)));
+
+        tr.append(tdDevice, tdStatus, tdType, tdCaps, tdEndpoints, tdLast);
+        tbody.append(tr);
+      }
+      table.append(thead, tbody);
+      root.append(table);
+    }
+
+    function renderEvents(id, events, emptyText, mapper) {
+      const root = document.getElementById(id);
+      root.replaceChildren();
+      if (!events.length) {
+        root.append(el("div", "empty", emptyText));
+        return;
+      }
+      for (const event of [...events].reverse()) {
+        const item = el("div", "event");
+        mapper(item, event);
+        root.append(item);
+      }
+    }
+
+    function render(data) {
+      document.getElementById("serverMeta").textContent =
+        `Listening on ${data.server.host}:${data.server.port} | uptime ${uptime(data.server.uptime_seconds)} | stale after ${data.server.device_stale_seconds}s`;
+      renderStats(data);
+      renderDevices(data.devices);
+      renderEvents("commands", data.recent_commands, "No commands recorded.", (item, command) => {
+        item.append(el("div", "device-id", text(command.command)));
+        item.append(el("div", "meta", `${text(command.device_id)} | ${text(command.duration_ms)} ms | tone ${text(command.tone)}`));
+        item.append(el("div", "", text(command.display_text)));
+      });
+      renderEvents("buttonEvents", data.recent_button_events, "No button events recorded.", (item, event) => {
+        item.append(el("div", "device-id", `${text(event.device_id)} ${text(event.event)}`));
+        item.append(el("div", "meta", `button ${text(event.button)} | gpio ${text(event.gpio)} | count ${text(event.click_count)}`));
+      });
+      document.getElementById("refreshState").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/dashboard-data", {cache: "no-store"});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        render(await response.json());
+      } catch (error) {
+        document.getElementById("refreshState").textContent = `Refresh failed: ${error.message}`;
+      }
+    }
+
+    document.getElementById("refreshButton").addEventListener("click", refresh);
+    refresh();
+    state.timer = setInterval(refresh, state.refreshMs);
+  </script>
+</body>
+</html>
+"""
+
+
 def dispatch_command(text: str, device_id: str) -> dict[str, Any] | None:
     normalized = normalize_command_text(text)
     for command in COMMANDS:
@@ -868,6 +1364,14 @@ class CommandHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
 
+        if parsed.path in ("/", "/dashboard"):
+            html_response(self, 200, DASHBOARD_HTML)
+            return
+        if parsed.path == "/dashboard-data":
+            with STATE_LOCK:
+                payload = dashboard_snapshot()
+            json_response(self, 200, payload)
+            return
         if parsed.path == "/health":
             json_response(self, 200, {"ok": True, "service": "spoken-command-server"})
             return
