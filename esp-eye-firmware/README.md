@@ -6,7 +6,11 @@ Current milestone:
 
 - connect to Wi-Fi,
 - register with the command server as `esp-eye-<mac-suffix>`,
-- advertise camera and microphone capabilities for later work,
+- initialize the OV2640 camera,
+- host a local HTTP camera page,
+- expose `/capture` for a single JPEG frame,
+- expose `/stream` for a slow MJPEG stream,
+- advertise camera endpoints and microphone capability,
 - refresh registration periodically.
 
 Configure Wi-Fi and server URL with:
@@ -29,3 +33,11 @@ idf.py set-target esp32
 idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
+
+After boot, the firmware logs the device URL:
+
+- `http://<device-ip>/`
+- `http://<device-ip>/capture`
+- `http://<device-ip>/stream`
+
+The same endpoints are also sent to the command server during registration.

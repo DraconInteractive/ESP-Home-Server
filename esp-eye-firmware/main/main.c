@@ -3,18 +3,22 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_camera.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
+#include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_psram.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "mdns.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -24,9 +28,29 @@ static const char *TAG = "esp_eye";
 #define WIFI_FAIL_BIT BIT1
 #define WIFI_MAX_RETRIES 5
 
+#define CAM_PIN_PWDN   -1
+#define CAM_PIN_RESET  -1
+#define CAM_PIN_XCLK    4
+#define CAM_PIN_SIOD   18
+#define CAM_PIN_SIOC   23
+#define CAM_PIN_D7     36
+#define CAM_PIN_D6     37
+#define CAM_PIN_D5     38
+#define CAM_PIN_D4     39
+#define CAM_PIN_D3     35
+#define CAM_PIN_D2     14
+#define CAM_PIN_D1     13
+#define CAM_PIN_D0     34
+#define CAM_PIN_VSYNC   5
+#define CAM_PIN_HREF   27
+#define CAM_PIN_PCLK   25
+#define CAM_PIN_LED    22
+
 static EventGroupHandle_t s_wifi_event_group;
+static httpd_handle_t s_http_server;
 static int s_wifi_retry_count;
 static bool s_wifi_ready;
+static bool s_camera_ready;
 static char s_device_id[48] = "esp-eye-unknown";
 static char s_ip_addr[16] = "0.0.0.0";
 
@@ -71,27 +95,35 @@ static void register_with_server(void)
     }
 
     char path[96] = {0};
-    char body[512] = {0};
+    char body[768] = {0};
     int status = 0;
     bool psram_ready = esp_psram_is_initialized();
 
     snprintf(path, sizeof(path), "/devices/%s/register", s_device_id);
     snprintf(body, sizeof(body),
              "{"
-             "\"type\":\"sensor\","
+             "\"type\":\"camera\","
              "\"model\":\"ESP-EYE v2.1\","
-             "\"capabilities\":[\"camera\",\"microphone\"],"
+             "\"capabilities\":[\"capture\",\"stream\",\"microphone\"],"
+             "\"endpoints\":{"
+             "\"root\":\"http://%s/\","
+             "\"capture\":\"http://%s/capture\","
+             "\"stream\":\"http://%s/stream\""
+             "},"
              "\"status\":{"
              "\"ip\":\"%s\","
              "\"camera\":\"OV2640\","
              "\"microphone\":\"MEMS\","
              "\"psram_ready\":%s,"
+             "\"camera_ready\":%s,"
              "\"flash_mb\":4,"
-             "\"stage\":\"registration\""
+             "\"stage\":\"camera-http\""
              "}"
              "}",
+             s_ip_addr, s_ip_addr, s_ip_addr,
              s_ip_addr,
-             psram_ready ? "true" : "false");
+             psram_ready ? "true" : "false",
+             s_camera_ready ? "true" : "false");
 
     esp_err_t err = post_json(path, body, &status);
     if (err == ESP_OK && status >= 200 && status < 300) {
@@ -99,6 +131,183 @@ static void register_with_server(void)
     } else {
         ESP_LOGW(TAG, "Registration failed: err=%s status=%d", esp_err_to_name(err), status);
     }
+}
+
+static esp_err_t root_get(httpd_req_t *req)
+{
+    char page[900] = {0};
+    snprintf(page, sizeof(page),
+             "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+             "<title>ESP-EYE</title></head><body>"
+             "<h1>ESP-EYE</h1>"
+             "<p>Device: %s</p>"
+             "<p>IP: %s</p>"
+             "<p>Camera: %s</p>"
+             "<p><a href='/capture'>Single JPEG capture</a></p>"
+             "<p><a href='/stream'>MJPEG stream</a></p>"
+             "<img src='/stream' style='max-width:100%%;height:auto'>"
+             "</body></html>",
+             s_device_id,
+             s_ip_addr,
+             s_camera_ready ? "ready" : "not ready");
+
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t capture_get(httpd_req_t *req)
+{
+    if (!s_camera_ready) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "camera not ready");
+        return ESP_FAIL;
+    }
+
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+    return err;
+}
+
+static esp_err_t stream_get(httpd_req_t *req)
+{
+    if (!s_camera_ready) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "camera not ready");
+        return ESP_FAIL;
+    }
+
+    static const char *boundary = "123456789000000000000987654321";
+    char header[128];
+    int64_t last_frame = esp_timer_get_time();
+
+    httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=123456789000000000000987654321");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    while (true) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (!fb) {
+            ESP_LOGW(TAG, "Camera capture failed");
+            return ESP_FAIL;
+        }
+
+        if (httpd_resp_send_chunk(req, "--", 2) != ESP_OK ||
+            httpd_resp_send_chunk(req, boundary, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
+            httpd_resp_send_chunk(req, "\r\n", 2) != ESP_OK) {
+            esp_camera_fb_return(fb);
+            break;
+        }
+
+        int header_len = snprintf(header, sizeof(header),
+                                  "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+                                  (unsigned)fb->len);
+        if (httpd_resp_send_chunk(req, header, header_len) != ESP_OK ||
+            httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len) != ESP_OK ||
+            httpd_resp_send_chunk(req, "\r\n", 2) != ESP_OK) {
+            esp_camera_fb_return(fb);
+            break;
+        }
+
+        int64_t now = esp_timer_get_time();
+        ESP_LOGI(TAG, "Frame %u bytes, %.2f fps", (unsigned)fb->len, 1000000.0 / (double)(now - last_frame));
+        last_frame = now;
+
+        esp_camera_fb_return(fb);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    return ESP_OK;
+}
+
+static void start_http_server(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 8192;
+    config.server_port = 80;
+
+    ESP_ERROR_CHECK(httpd_start(&s_http_server, &config));
+
+    httpd_uri_t root = {.uri = "/", .method = HTTP_GET, .handler = root_get};
+    httpd_uri_t capture = {.uri = "/capture", .method = HTTP_GET, .handler = capture_get};
+    httpd_uri_t stream = {.uri = "/stream", .method = HTTP_GET, .handler = stream_get};
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &root));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &capture));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &stream));
+}
+
+static void start_mdns_service(void)
+{
+    char instance[80] = {0};
+    snprintf(instance, sizeof(instance), "ESP-EYE %s", s_device_id);
+
+    mdns_txt_item_t txt[] = {
+        {"device_id", s_device_id},
+        {"type", "camera"},
+        {"model", "ESP-EYE v2.1"},
+        {"capture", "/capture"},
+        {"stream", "/stream"},
+    };
+
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_hostname_set(s_device_id));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_instance_name_set(instance));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_service_add(instance, "_http", "_tcp", 80, txt, sizeof(txt) / sizeof(txt[0])));
+    ESP_LOGI(TAG, "mDNS advertised: http://%s.local/", s_device_id);
+}
+
+static esp_err_t camera_init(void)
+{
+    camera_config_t config = {
+        .pin_pwdn = CAM_PIN_PWDN,
+        .pin_reset = CAM_PIN_RESET,
+        .pin_xclk = CAM_PIN_XCLK,
+        .pin_sccb_sda = CAM_PIN_SIOD,
+        .pin_sccb_scl = CAM_PIN_SIOC,
+        .pin_d7 = CAM_PIN_D7,
+        .pin_d6 = CAM_PIN_D6,
+        .pin_d5 = CAM_PIN_D5,
+        .pin_d4 = CAM_PIN_D4,
+        .pin_d3 = CAM_PIN_D3,
+        .pin_d2 = CAM_PIN_D2,
+        .pin_d1 = CAM_PIN_D1,
+        .pin_d0 = CAM_PIN_D0,
+        .pin_vsync = CAM_PIN_VSYNC,
+        .pin_href = CAM_PIN_HREF,
+        .pin_pclk = CAM_PIN_PCLK,
+        .xclk_freq_hz = 20000000,
+        .ledc_timer = LEDC_TIMER_0,
+        .ledc_channel = LEDC_CHANNEL_0,
+        .pixel_format = PIXFORMAT_JPEG,
+        .frame_size = FRAMESIZE_QVGA,
+        .jpeg_quality = 14,
+        .fb_count = 2,
+        .fb_location = CAMERA_FB_IN_PSRAM,
+        .grab_mode = CAMERA_GRAB_LATEST,
+    };
+
+    ESP_LOGI(TAG, "PSRAM size: %u bytes", (unsigned)esp_psram_get_size());
+    ESP_RETURN_ON_ERROR(esp_camera_init(&config), TAG, "camera init");
+
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (sensor) {
+        sensor->set_framesize(sensor, FRAMESIZE_QVGA);
+        sensor->set_quality(sensor, 14);
+    }
+
+    s_camera_ready = true;
+    return ESP_OK;
 }
 
 static void registration_task(void *arg)
@@ -172,6 +381,16 @@ void app_main(void)
 
     if (wifi_init_sta() != ESP_OK) {
         ESP_LOGW(TAG, "Wi-Fi not connected; registration will retry after restart");
+    }
+
+    if (s_wifi_ready) {
+        esp_err_t camera_err = camera_init();
+        if (camera_err != ESP_OK) {
+            ESP_LOGE(TAG, "Camera init failed: %s", esp_err_to_name(camera_err));
+        }
+        start_http_server();
+        start_mdns_service();
+        ESP_LOGI(TAG, "ESP-EYE URL: http://%s/", s_ip_addr);
     }
 
     register_with_server();
