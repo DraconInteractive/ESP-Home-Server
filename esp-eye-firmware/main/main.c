@@ -1,8 +1,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "driver/i2s_std.h"
 #include "esp_camera.h"
 #include "esp_check.h"
 #include "esp_err.h"
@@ -46,13 +48,60 @@ static const char *TAG = "esp_eye";
 #define CAM_PIN_PCLK   25
 #define CAM_PIN_LED    22
 
+#define MIC_I2S_PORT I2S_NUM_1
+#define MIC_I2S_BCLK 26
+#define MIC_I2S_WS   32
+#define MIC_I2S_DIN  33
+
+#define AUDIO_SAMPLE_RATE 16000
+#define AUDIO_CAPTURE_MS 1000
+#define AUDIO_SAMPLE_BYTES 2
+#define AUDIO_CHANNELS 1
+#define AUDIO_WAV_HEADER_BYTES 44
+
 static EventGroupHandle_t s_wifi_event_group;
 static httpd_handle_t s_http_server;
+static i2s_chan_handle_t s_i2s_rx_chan;
 static int s_wifi_retry_count;
 static bool s_wifi_ready;
 static bool s_camera_ready;
+static bool s_audio_ready;
 static char s_device_id[48] = "esp-eye-unknown";
 static char s_ip_addr[16] = "0.0.0.0";
+
+static void put_le16(uint8_t *dst, uint16_t value)
+{
+    dst[0] = value & 0xff;
+    dst[1] = (value >> 8) & 0xff;
+}
+
+static void put_le32(uint8_t *dst, uint32_t value)
+{
+    dst[0] = value & 0xff;
+    dst[1] = (value >> 8) & 0xff;
+    dst[2] = (value >> 16) & 0xff;
+    dst[3] = (value >> 24) & 0xff;
+}
+
+static void write_wav_header(uint8_t *header, uint32_t data_bytes)
+{
+    const uint32_t byte_rate = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * AUDIO_SAMPLE_BYTES;
+    const uint16_t block_align = AUDIO_CHANNELS * AUDIO_SAMPLE_BYTES;
+
+    memcpy(header + 0, "RIFF", 4);
+    put_le32(header + 4, 36 + data_bytes);
+    memcpy(header + 8, "WAVE", 4);
+    memcpy(header + 12, "fmt ", 4);
+    put_le32(header + 16, 16);
+    put_le16(header + 20, 1);
+    put_le16(header + 22, AUDIO_CHANNELS);
+    put_le32(header + 24, AUDIO_SAMPLE_RATE);
+    put_le32(header + 28, byte_rate);
+    put_le16(header + 32, block_align);
+    put_le16(header + 34, AUDIO_SAMPLE_BYTES * 8);
+    memcpy(header + 36, "data", 4);
+    put_le32(header + 40, data_bytes);
+}
 
 static void init_device_id(void)
 {
@@ -108,7 +157,8 @@ static void register_with_server(void)
              "\"endpoints\":{"
              "\"root\":\"http://%s/\","
              "\"capture\":\"http://%s/capture\","
-             "\"stream\":\"http://%s/stream\""
+             "\"stream\":\"http://%s/stream\","
+             "\"audio\":\"http://%s/audio\""
              "},"
              "\"status\":{"
              "\"ip\":\"%s\","
@@ -116,14 +166,16 @@ static void register_with_server(void)
              "\"microphone\":\"MEMS\","
              "\"psram_ready\":%s,"
              "\"camera_ready\":%s,"
+             "\"audio_ready\":%s,"
              "\"flash_mb\":4,"
-             "\"stage\":\"camera-http\""
+             "\"stage\":\"camera-audio-http\""
              "}"
              "}",
-             s_ip_addr, s_ip_addr, s_ip_addr,
+             s_ip_addr, s_ip_addr, s_ip_addr, s_ip_addr,
              s_ip_addr,
              psram_ready ? "true" : "false",
-             s_camera_ready ? "true" : "false");
+             s_camera_ready ? "true" : "false",
+             s_audio_ready ? "true" : "false");
 
     esp_err_t err = post_json(path, body, &status);
     if (err == ESP_OK && status >= 200 && status < 300) {
@@ -145,6 +197,7 @@ static esp_err_t root_get(httpd_req_t *req)
              "<p>Camera: %s</p>"
              "<p><a href='/capture'>Single JPEG capture</a></p>"
              "<p><a href='/stream'>MJPEG stream</a></p>"
+             "<p><a href='/audio'>One second WAV audio capture</a></p>"
              "<img src='/stream' style='max-width:100%%;height:auto'>"
              "</body></html>",
              s_device_id,
@@ -226,6 +279,58 @@ static esp_err_t stream_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t audio_get(httpd_req_t *req)
+{
+    if (!s_audio_ready) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "audio not ready");
+        return ESP_FAIL;
+    }
+
+    const size_t sample_count = (AUDIO_SAMPLE_RATE * AUDIO_CAPTURE_MS) / 1000;
+    const size_t data_bytes = sample_count * AUDIO_SAMPLE_BYTES;
+    uint8_t header[AUDIO_WAV_HEADER_BYTES] = {0};
+    int16_t *pcm = malloc(data_bytes);
+    int32_t raw[256];
+
+    if (!pcm) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    size_t written_samples = 0;
+    while (written_samples < sample_count) {
+        size_t bytes_read = 0;
+        esp_err_t err = i2s_channel_read(s_i2s_rx_chan, raw, sizeof(raw), &bytes_read, pdMS_TO_TICKS(1000));
+        if (err != ESP_OK) {
+            free(pcm);
+            ESP_LOGW(TAG, "I2S read failed: %s", esp_err_to_name(err));
+            httpd_resp_send_500(req);
+            return ESP_FAIL;
+        }
+
+        size_t raw_samples = bytes_read / sizeof(raw[0]);
+        for (size_t i = 0; i < raw_samples && written_samples < sample_count; i++) {
+            pcm[written_samples++] = (int16_t)(raw[i] >> 14);
+        }
+    }
+
+    write_wav_header(header, data_bytes);
+    httpd_resp_set_type(req, "audio/wav");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send_chunk(req, (const char *)header, sizeof(header));
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, (const char *)pcm, data_bytes);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+
+    ESP_LOGI(TAG, "Audio capture %u bytes", (unsigned)data_bytes);
+    free(pcm);
+    return err;
+}
+
 static void start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -237,9 +342,11 @@ static void start_http_server(void)
     httpd_uri_t root = {.uri = "/", .method = HTTP_GET, .handler = root_get};
     httpd_uri_t capture = {.uri = "/capture", .method = HTTP_GET, .handler = capture_get};
     httpd_uri_t stream = {.uri = "/stream", .method = HTTP_GET, .handler = stream_get};
+    httpd_uri_t audio = {.uri = "/audio", .method = HTTP_GET, .handler = audio_get};
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &capture));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &stream));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &audio));
 }
 
 static void start_mdns_service(void)
@@ -253,6 +360,7 @@ static void start_mdns_service(void)
         {"model", "ESP-EYE v2.1"},
         {"capture", "/capture"},
         {"stream", "/stream"},
+        {"audio", "/audio"},
     };
 
     esp_err_t err = mdns_init();
@@ -307,6 +415,36 @@ static esp_err_t camera_init(void)
     }
 
     s_camera_ready = true;
+    return ESP_OK;
+}
+
+static esp_err_t audio_init(void)
+{
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(MIC_I2S_PORT, I2S_ROLE_MASTER);
+    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, NULL, &s_i2s_rx_chan), TAG, "i2s new channel");
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE),
+        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = MIC_I2S_BCLK,
+            .ws = MIC_I2S_WS,
+            .dout = I2S_GPIO_UNUSED,
+            .din = MIC_I2S_DIN,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            },
+        },
+    };
+
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_i2s_rx_chan, &std_cfg), TAG, "i2s std init");
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_i2s_rx_chan), TAG, "i2s enable");
+    s_audio_ready = true;
+    ESP_LOGI(TAG, "Audio ready: %d Hz mono WAV on /audio", AUDIO_SAMPLE_RATE);
     return ESP_OK;
 }
 
@@ -387,6 +525,10 @@ void app_main(void)
         esp_err_t camera_err = camera_init();
         if (camera_err != ESP_OK) {
             ESP_LOGE(TAG, "Camera init failed: %s", esp_err_to_name(camera_err));
+        }
+        esp_err_t audio_err = audio_init();
+        if (audio_err != ESP_OK) {
+            ESP_LOGE(TAG, "Audio init failed: %s", esp_err_to_name(audio_err));
         }
         start_http_server();
         start_mdns_service();

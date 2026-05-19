@@ -10,6 +10,7 @@ Current milestone:
 - host a local HTTP camera page,
 - expose `/capture` for a single JPEG frame,
 - expose `/stream` for a slow MJPEG stream,
+- expose `/audio` for a one second WAV microphone capture,
 - advertise camera endpoints and microphone capability,
 - refresh registration periodically.
 
@@ -39,5 +40,6 @@ After boot, the firmware logs the device URL:
 - `http://<device-ip>/`
 - `http://<device-ip>/capture`
 - `http://<device-ip>/stream`
+- `http://<device-ip>/audio`
 
 The same endpoints are also sent to the command server during registration.
