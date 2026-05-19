@@ -18,6 +18,10 @@ The server listens on `0.0.0.0:8080` by default.
 - `GET /` or `GET /dashboard` opens the local device dashboard.
 - `GET /dashboard-data` returns the dashboard snapshot used by the UI.
 - `GET /health` returns a basic health check.
+- `GET /media/{device_id}/{endpoint}` proxies a registered device media
+  endpoint. Supported endpoint names are `capture`, `audio`, `video`, and
+  `stream`. Finite endpoints are cached briefly; stream endpoints share one
+  upstream device connection across multiple server clients.
 - `GET /devices` returns known devices and their server-side state.
 - `GET /devices/{device_id}` returns one known device.
 - `GET /devices/{device_id}/events` returns and clears the next queued device

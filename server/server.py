@@ -31,6 +31,9 @@ MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "scribe_v2")
 MAX_AUDIO_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_AUDIO_BYTES", str(4 * 1024 * 1024)))
 DEVICE_STALE_SECONDS = int(os.environ.get("COMMAND_SERVER_DEVICE_STALE_SECONDS", "45"))
 DEVICE_PING_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_DEVICE_PING_TIMEOUT_SECONDS", "2.0"))
+MEDIA_SNAPSHOT_TTL_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_SNAPSHOT_TTL_SECONDS", "1.0"))
+MEDIA_STREAM_IDLE_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_STREAM_IDLE_SECONDS", "3.0"))
+MEDIA_STREAM_CHUNK_SIZE = int(os.environ.get("COMMAND_SERVER_MEDIA_STREAM_CHUNK_SIZE", "4096"))
 SERVER_STARTED_AT = int(time.time())
 
 RECENT_COMMANDS: list[dict[str, Any]] = []
@@ -40,7 +43,12 @@ GLOBAL_MUTED = False
 PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
 DEVICES: dict[str, dict[str, Any]] = {}
 DEVICE_EVENTS: dict[str, list[dict[str, Any]]] = {}
+MEDIA_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+MEDIA_STREAMS: dict[tuple[str, str], "MediaStreamProxy"] = {}
 STATE_LOCK = threading.RLock()
+
+STREAM_ENDPOINT_NAMES = {"video", "stream"}
+MEDIA_ENDPOINT_NAMES = {"capture", "audio", "video", "stream"}
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,84 @@ class Command:
     aliases: tuple[str, ...]
     description: str
     handler: Callable[[str, str, str], dict[str, Any]]
+
+
+class MediaStreamProxy:
+    def __init__(self, device_id: str, endpoint_name: str, url: str):
+        self.device_id = device_id
+        self.endpoint_name = endpoint_name
+        self.url = url
+        self.condition = threading.Condition()
+        self.chunks: list[tuple[int, bytes]] = []
+        self.seq = 0
+        self.content_type = "application/octet-stream"
+        self.error: str | None = None
+        self.thread: threading.Thread | None = None
+        self.clients = 0
+        self.last_client_left_at = 0.0
+        self.stop_requested = False
+
+    def ensure_started(self) -> None:
+        with self.condition:
+            if self.thread and self.thread.is_alive():
+                return
+            self.error = None
+            self.stop_requested = False
+            self.chunks = []
+            self.seq = 0
+            self.content_type = "application/octet-stream"
+            self.thread = threading.Thread(
+                target=self._reader,
+                name=f"media-{self.device_id}-{self.endpoint_name}",
+                daemon=True,
+            )
+            self.thread.start()
+
+    def _reader(self) -> None:
+        try:
+            request = Request(self.url, headers={"User-Agent": "SpokenCommandServer/0.1"})
+            with urlopen(request, timeout=10) as response:
+                with self.condition:
+                    self.content_type = response.headers.get("Content-Type", "application/octet-stream")
+                    self.condition.notify_all()
+
+                while True:
+                    with self.condition:
+                        if self.stop_requested:
+                            break
+                        if self.clients <= 0 and self.last_client_left_at:
+                            idle_for = time.monotonic() - self.last_client_left_at
+                            if idle_for >= MEDIA_STREAM_IDLE_SECONDS:
+                                break
+
+                    chunk = response.read(MEDIA_STREAM_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    with self.condition:
+                        self.seq += 1
+                        self.chunks.append((self.seq, chunk))
+                        del self.chunks[:-64]
+                        self.condition.notify_all()
+        except Exception as exc:
+            with self.condition:
+                self.error = str(exc)
+                self.condition.notify_all()
+        finally:
+            with self.condition:
+                self.thread = None
+                self.condition.notify_all()
+
+    def add_client(self) -> None:
+        with self.condition:
+            self.clients += 1
+            self.last_client_left_at = 0.0
+
+    def remove_client(self) -> None:
+        with self.condition:
+            self.clients = max(0, self.clients - 1)
+            if self.clients == 0:
+                self.last_client_left_at = time.monotonic()
+            self.condition.notify_all()
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -67,6 +153,18 @@ def html_response(handler: BaseHTTPRequestHandler, status: int, body: str) -> No
     handler.send_header("Content-Length", str(len(encoded)))
     handler.end_headers()
     handler.wfile.write(encoded)
+
+
+def binary_response(handler: BaseHTTPRequestHandler, status: int, content_type: str, body: bytes,
+                    extra_headers: dict[str, str] | None = None) -> None:
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(body)))
+    if extra_headers:
+        for key, value in extra_headers.items():
+            handler.send_header(key, value)
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 def read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
@@ -351,6 +449,11 @@ def dashboard_device(device_id: str) -> dict[str, Any]:
     public["age_seconds"] = age_seconds
     public["ip"] = device_ip(raw)
     public["display_name"] = device_display_name(device_id, raw)
+    public["proxy_endpoints"] = {
+        name: f"/media/{device_id}/{name}"
+        for name in sorted((public.get("endpoints") or {}).keys())
+        if name in MEDIA_ENDPOINT_NAMES
+    }
     return public
 
 
@@ -374,6 +477,8 @@ def dashboard_snapshot() -> dict[str, Any]:
             "uptime_seconds": int(time.time() - SERVER_STARTED_AT),
             "global_muted": GLOBAL_MUTED,
             "device_stale_seconds": DEVICE_STALE_SECONDS,
+            "media_snapshot_ttl_seconds": MEDIA_SNAPSHOT_TTL_SECONDS,
+            "media_stream_idle_seconds": MEDIA_STREAM_IDLE_SECONDS,
         },
         "summary": {
             "device_count": len(devices),
@@ -391,11 +496,140 @@ def dashboard_snapshot() -> dict[str, Any]:
     }
 
 
+def media_endpoint_url(device_id: str, endpoint_name: str) -> str | None:
+    if endpoint_name not in MEDIA_ENDPOINT_NAMES:
+        return None
+    device = DEVICES.get(device_id)
+    if not device:
+        return None
+    endpoints = device.get("endpoints", {})
+    if not isinstance(endpoints, dict):
+        return None
+    url = endpoints.get(endpoint_name)
+    return str(url) if url else None
+
+
+def fetch_media_snapshot(device_id: str, endpoint_name: str, url: str) -> dict[str, Any]:
+    key = (device_id, endpoint_name)
+    now = time.monotonic()
+    cached = MEDIA_CACHE.get(key)
+    if cached and now - float(cached.get("fetched_at", 0)) <= MEDIA_SNAPSHOT_TTL_SECONDS:
+        return cached
+
+    request = Request(url, headers={"User-Agent": "SpokenCommandServer/0.1"})
+    with urlopen(request, timeout=10) as response:
+        body = response.read(MAX_AUDIO_BYTES)
+        if len(body) >= MAX_AUDIO_BYTES:
+            raise ValueError("proxied media response reached maximum size")
+        result = {
+            "fetched_at": now,
+            "status": response.status,
+            "content_type": response.headers.get("Content-Type", "application/octet-stream"),
+            "body": body,
+        }
+    MEDIA_CACHE[key] = result
+    return result
+
+
+def stream_media_proxy(handler: BaseHTTPRequestHandler, device_id: str, endpoint_name: str, url: str) -> None:
+    key = (device_id, endpoint_name)
+    with STATE_LOCK:
+        proxy = MEDIA_STREAMS.get(key)
+        if proxy is None or proxy.url != url:
+            proxy = MediaStreamProxy(device_id, endpoint_name, url)
+            MEDIA_STREAMS[key] = proxy
+
+    proxy.add_client()
+    proxy.ensure_started()
+    last_seq = 0
+    try:
+        with proxy.condition:
+            deadline = time.monotonic() + 3
+            while proxy.seq == 0 and proxy.error is None and time.monotonic() < deadline:
+                proxy.condition.wait(timeout=0.25)
+            if proxy.error and proxy.seq == 0:
+                json_response(handler, 502, {
+                    "error": "media stream upstream failed",
+                    "detail": proxy.error,
+                    "device_id": device_id,
+                    "endpoint": endpoint_name,
+                })
+                return
+            if proxy.seq == 0:
+                json_response(handler, 504, {
+                    "error": "media stream produced no data",
+                    "device_id": device_id,
+                    "endpoint": endpoint_name,
+                })
+                return
+            content_type = proxy.content_type
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Proxied-Device", device_id)
+        handler.send_header("X-Proxied-Endpoint", endpoint_name)
+        handler.end_headers()
+
+        while True:
+            with proxy.condition:
+                while proxy.seq <= last_seq and proxy.error is None:
+                    if proxy.thread is None:
+                        break
+                    proxy.condition.wait(timeout=2)
+                if proxy.error and proxy.seq <= last_seq:
+                    break
+                if proxy.thread is None and proxy.seq <= last_seq:
+                    break
+                chunks = [(seq, chunk) for seq, chunk in proxy.chunks if seq > last_seq]
+
+            for seq, chunk in chunks:
+                handler.wfile.write(chunk)
+                last_seq = seq
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        proxy.remove_client()
+
+
+def proxy_media(handler: BaseHTTPRequestHandler, device_id: str, endpoint_name: str) -> None:
+    with STATE_LOCK:
+        url = media_endpoint_url(device_id, endpoint_name)
+    if not url:
+        json_response(handler, 404, {"error": "media endpoint not found", "device_id": device_id, "endpoint": endpoint_name})
+        return
+
+    if endpoint_name in STREAM_ENDPOINT_NAMES:
+        stream_media_proxy(handler, device_id, endpoint_name, url)
+        return
+
+    try:
+        media = fetch_media_snapshot(device_id, endpoint_name, url)
+        binary_response(
+            handler,
+            int(media.get("status", 200)),
+            str(media.get("content_type", "application/octet-stream")),
+            media["body"],
+            {"Cache-Control": "no-store", "X-Proxied-Device": device_id, "X-Proxied-Endpoint": endpoint_name},
+        )
+    except Exception as exc:
+        json_response(handler, 502, {"error": "media proxy failed", "detail": str(exc), "device_id": device_id, "endpoint": endpoint_name})
+
+
 def remove_device(device_id: str) -> None:
     DEVICES.pop(device_id, None)
     DEVICE_EVENTS.pop(device_id, None)
     MUTED_DEVICES.pop(device_id, None)
     PENDING_ACTIONS.pop(device_id, None)
+    for key in list(MEDIA_CACHE):
+        if key[0] == device_id:
+            MEDIA_CACHE.pop(key, None)
+    for key, proxy in list(MEDIA_STREAMS.items()):
+        if key[0] == device_id:
+            with proxy.condition:
+                proxy.stop_requested = True
+                proxy.condition.notify_all()
+            MEDIA_STREAMS.pop(key, None)
 
 
 def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None) -> dict[str, Any]:
@@ -1190,12 +1424,20 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
-    function endpointLinks(endpoints) {
+    function endpointLinks(deviceId, endpoints, proxyEndpoints) {
       const wrap = el("div", "links");
       const entries = Object.entries(endpoints || {});
-      if (!entries.length) {
+      const proxyEntries = Object.entries(proxyEndpoints || {});
+      if (!entries.length && !proxyEntries.length) {
         wrap.append(el("span", "meta", "-"));
         return wrap;
+      }
+      for (const [name, url] of proxyEntries) {
+        const link = el("a", "", `proxy ${name}`);
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        wrap.append(link);
       }
       for (const [name, url] of entries) {
         const link = el("a", "", name);
@@ -1256,7 +1498,7 @@ DASHBOARD_HTML = """<!doctype html>
 
         const tdEndpoints = document.createElement("td");
         tdEndpoints.dataset.label = "Endpoints";
-        tdEndpoints.append(endpointLinks(device.endpoints));
+        tdEndpoints.append(endpointLinks(device.id, device.endpoints, device.proxy_endpoints));
 
         const tdLast = document.createElement("td");
         tdLast.dataset.label = "Last Result";
@@ -1374,6 +1616,14 @@ class CommandHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/health":
             json_response(self, 200, {"ok": True, "service": "spoken-command-server"})
+            return
+        if parsed.path.startswith("/media/"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) != 3:
+                json_response(self, 404, {"error": "expected /media/{device_id}/{endpoint}"})
+                return
+            _media, device_text, endpoint_text = parts
+            proxy_media(self, clean_device_id(device_text), clean_device_id(endpoint_text))
             return
         if parsed.path == "/devices":
             with STATE_LOCK:
