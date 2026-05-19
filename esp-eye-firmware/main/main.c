@@ -58,6 +58,7 @@ static const char *TAG = "esp_eye";
 #define AUDIO_SAMPLE_BYTES 2
 #define AUDIO_CHANNELS 1
 #define AUDIO_WAV_HEADER_BYTES 44
+#define STREAM_BOUNDARY "esp-eye-av-boundary"
 
 static EventGroupHandle_t s_wifi_event_group;
 static httpd_handle_t s_http_server;
@@ -144,7 +145,7 @@ static void register_with_server(void)
     }
 
     char path[96] = {0};
-    char body[768] = {0};
+    char body[1024] = {0};
     int status = 0;
     bool psram_ready = esp_psram_is_initialized();
 
@@ -153,10 +154,11 @@ static void register_with_server(void)
              "{"
              "\"type\":\"camera\","
              "\"model\":\"ESP-EYE v2.1\","
-             "\"capabilities\":[\"capture\",\"stream\",\"microphone\"],"
+             "\"capabilities\":[\"capture\",\"video\",\"stream\",\"microphone\"],"
              "\"endpoints\":{"
              "\"root\":\"http://%s/\","
              "\"capture\":\"http://%s/capture\","
+             "\"video\":\"http://%s/video\","
              "\"stream\":\"http://%s/stream\","
              "\"audio\":\"http://%s/audio\""
              "},"
@@ -171,7 +173,7 @@ static void register_with_server(void)
              "\"stage\":\"camera-audio-http\""
              "}"
              "}",
-             s_ip_addr, s_ip_addr, s_ip_addr, s_ip_addr,
+             s_ip_addr, s_ip_addr, s_ip_addr, s_ip_addr, s_ip_addr,
              s_ip_addr,
              psram_ready ? "true" : "false",
              s_camera_ready ? "true" : "false",
@@ -187,7 +189,7 @@ static void register_with_server(void)
 
 static esp_err_t root_get(httpd_req_t *req)
 {
-    char page[900] = {0};
+    char page[1200] = {0};
     snprintf(page, sizeof(page),
              "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
              "<title>ESP-EYE</title></head><body>"
@@ -196,9 +198,10 @@ static esp_err_t root_get(httpd_req_t *req)
              "<p>IP: %s</p>"
              "<p>Camera: %s</p>"
              "<p><a href='/capture'>Single JPEG capture</a></p>"
-             "<p><a href='/stream'>MJPEG stream</a></p>"
+             "<p><a href='/video'>MJPEG video stream</a></p>"
              "<p><a href='/audio'>One second WAV audio capture</a></p>"
-             "<img src='/stream' style='max-width:100%%;height:auto'>"
+             "<p><a href='/stream'>Combined JPEG and WAV multipart stream</a></p>"
+             "<img src='/video' style='max-width:100%%;height:auto'>"
              "</body></html>",
              s_device_id,
              s_ip_addr,
@@ -229,7 +232,7 @@ static esp_err_t capture_get(httpd_req_t *req)
     return err;
 }
 
-static esp_err_t stream_get(httpd_req_t *req)
+static esp_err_t video_get(httpd_req_t *req)
 {
     if (!s_camera_ready) {
         httpd_resp_set_status(req, "503 Service Unavailable");
@@ -279,34 +282,28 @@ static esp_err_t stream_get(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t audio_get(httpd_req_t *req)
+static esp_err_t capture_audio_wav(uint8_t **wav_out, size_t *wav_bytes_out)
 {
-    if (!s_audio_ready) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_sendstr(req, "audio not ready");
-        return ESP_FAIL;
-    }
-
     const size_t sample_count = (AUDIO_SAMPLE_RATE * AUDIO_CAPTURE_MS) / 1000;
     const size_t data_bytes = sample_count * AUDIO_SAMPLE_BYTES;
-    uint8_t header[AUDIO_WAV_HEADER_BYTES] = {0};
-    int16_t *pcm = malloc(data_bytes);
+    uint8_t *wav = malloc(AUDIO_WAV_HEADER_BYTES + data_bytes);
+    int16_t *pcm = NULL;
     int32_t raw[256];
 
-    if (!pcm) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
+    if (!wav) {
+        return ESP_ERR_NO_MEM;
     }
+
+    write_wav_header(wav, data_bytes);
+    pcm = (int16_t *)(wav + AUDIO_WAV_HEADER_BYTES);
 
     size_t written_samples = 0;
     while (written_samples < sample_count) {
         size_t bytes_read = 0;
         esp_err_t err = i2s_channel_read(s_i2s_rx_chan, raw, sizeof(raw), &bytes_read, pdMS_TO_TICKS(1000));
         if (err != ESP_OK) {
-            free(pcm);
-            ESP_LOGW(TAG, "I2S read failed: %s", esp_err_to_name(err));
-            httpd_resp_send_500(req);
-            return ESP_FAIL;
+            free(wav);
+            return err;
         }
 
         size_t raw_samples = bytes_read / sizeof(raw[0]);
@@ -315,20 +312,96 @@ static esp_err_t audio_get(httpd_req_t *req)
         }
     }
 
-    write_wav_header(header, data_bytes);
-    httpd_resp_set_type(req, "audio/wav");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    esp_err_t err = httpd_resp_send_chunk(req, (const char *)header, sizeof(header));
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, (const char *)pcm, data_bytes);
-    }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, NULL, 0);
+    *wav_out = wav;
+    *wav_bytes_out = AUDIO_WAV_HEADER_BYTES + data_bytes;
+    ESP_LOGI(TAG, "Audio capture %u bytes", (unsigned)data_bytes);
+    return ESP_OK;
+}
+
+static esp_err_t audio_get(httpd_req_t *req)
+{
+    if (!s_audio_ready) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "audio not ready");
+        return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Audio capture %u bytes", (unsigned)data_bytes);
-    free(pcm);
+    uint8_t *wav = NULL;
+    size_t wav_bytes = 0;
+    esp_err_t err = capture_audio_wav(&wav, &wav_bytes);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Audio capture failed: %s", esp_err_to_name(err));
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "audio/wav");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    err = httpd_resp_send(req, (const char *)wav, wav_bytes);
+    free(wav);
     return err;
+}
+
+static esp_err_t stream_get(httpd_req_t *req)
+{
+    if (!s_camera_ready || !s_audio_ready) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "camera or audio not ready");
+        return ESP_FAIL;
+    }
+
+    char header[160];
+
+    httpd_resp_set_type(req, "multipart/mixed;boundary=" STREAM_BOUNDARY);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    while (true) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (!fb) {
+            ESP_LOGW(TAG, "Camera capture failed");
+            return ESP_FAIL;
+        }
+
+        int header_len = snprintf(header, sizeof(header),
+                                  "--" STREAM_BOUNDARY "\r\n"
+                                  "Content-Type: image/jpeg\r\n"
+                                  "X-Stream-Type: video\r\n"
+                                  "Content-Length: %u\r\n\r\n",
+                                  (unsigned)fb->len);
+        if (httpd_resp_send_chunk(req, header, header_len) != ESP_OK ||
+            httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len) != ESP_OK ||
+            httpd_resp_send_chunk(req, "\r\n", 2) != ESP_OK) {
+            esp_camera_fb_return(fb);
+            break;
+        }
+        esp_camera_fb_return(fb);
+
+        uint8_t *wav = NULL;
+        size_t wav_bytes = 0;
+        esp_err_t err = capture_audio_wav(&wav, &wav_bytes);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Audio capture failed: %s", esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+
+        header_len = snprintf(header, sizeof(header),
+                              "--" STREAM_BOUNDARY "\r\n"
+                              "Content-Type: audio/wav\r\n"
+                              "X-Stream-Type: audio\r\n"
+                              "Content-Length: %u\r\n\r\n",
+                              (unsigned)wav_bytes);
+        if (httpd_resp_send_chunk(req, header, header_len) != ESP_OK ||
+            httpd_resp_send_chunk(req, (const char *)wav, wav_bytes) != ESP_OK ||
+            httpd_resp_send_chunk(req, "\r\n", 2) != ESP_OK) {
+            free(wav);
+            break;
+        }
+        free(wav);
+
+        ESP_LOGI(TAG, "AV stream part sent");
+    }
+
+    return ESP_OK;
 }
 
 static void start_http_server(void)
@@ -341,10 +414,12 @@ static void start_http_server(void)
 
     httpd_uri_t root = {.uri = "/", .method = HTTP_GET, .handler = root_get};
     httpd_uri_t capture = {.uri = "/capture", .method = HTTP_GET, .handler = capture_get};
+    httpd_uri_t video = {.uri = "/video", .method = HTTP_GET, .handler = video_get};
     httpd_uri_t stream = {.uri = "/stream", .method = HTTP_GET, .handler = stream_get};
     httpd_uri_t audio = {.uri = "/audio", .method = HTTP_GET, .handler = audio_get};
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &capture));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &video));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &stream));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &audio));
 }
@@ -359,6 +434,7 @@ static void start_mdns_service(void)
         {"type", "camera"},
         {"model", "ESP-EYE v2.1"},
         {"capture", "/capture"},
+        {"video", "/video"},
         {"stream", "/stream"},
         {"audio", "/audio"},
     };

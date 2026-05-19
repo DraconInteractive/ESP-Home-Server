@@ -9,8 +9,9 @@ Current milestone:
 - initialize the OV2640 camera,
 - host a local HTTP camera page,
 - expose `/capture` for a single JPEG frame,
-- expose `/stream` for a slow MJPEG stream,
+- expose `/video` for a slow MJPEG video stream,
 - expose `/audio` for a one second WAV microphone capture,
+- expose `/stream` for a combined JPEG and WAV multipart stream,
 - advertise camera endpoints and microphone capability,
 - refresh registration periodically.
 
@@ -39,6 +40,7 @@ After boot, the firmware logs the device URL:
 
 - `http://<device-ip>/`
 - `http://<device-ip>/capture`
+- `http://<device-ip>/video`
 - `http://<device-ip>/stream`
 - `http://<device-ip>/audio`
 
