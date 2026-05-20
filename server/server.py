@@ -1039,23 +1039,80 @@ def handle_help(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
     ))
 
 
-def handle_status(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
-    muted = MUTED_DEVICES.get(device_id, False)
-    pending = PENDING_ACTIONS.get(device_id)
-    status = "Server online. "
-    if GLOBAL_MUTED:
-        status += "All devices muted."
-    else:
-        status += "Muted." if muted else "Sound on."
+def handle_status(text: str, device_id: str, remainder: str) -> dict[str, Any]:
+    target_id = device_id
+    if remainder.strip():
+        target_id = resolve_device_reference(remainder) or ""
+        if not target_id:
+            return apply_mute_state(device_id, base_response(
+                False,
+                text,
+                "Device not found.",
+                "error",
+                command="status",
+                state={"query": remainder.strip()},
+            ))
+
+    target = DEVICES.get(target_id)
+    if target is None:
+        return apply_mute_state(device_id, base_response(
+            False,
+            text,
+            "Device not registered.",
+            "error",
+            command="status",
+            state={"target_id": target_id},
+        ))
+
+    online, detail = recent_device_online(target)
+    friendly_name = DEVICE_FRIENDLY_NAMES.get(target_id, "")
+    display_name = device_display_name(target_id, target)
+    pending = PENDING_ACTIONS.get(target_id)
+    muted = GLOBAL_MUTED or MUTED_DEVICES.get(target_id, False)
+    ip = device_ip(target)
+    device_type = str(target.get("type", "unknown"))
+    model = str(target.get("model", "")).strip()
+    capabilities = target.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        capabilities = []
+
+    lines = [
+        f"{display_name}",
+        f"{'Online' if online else 'Offline'}: {detail}",
+        f"ID: {target_id}",
+        f"IP: {ip}",
+        f"Type: {device_type}",
+    ]
+    if friendly_name:
+        lines.insert(1, f"Name: {friendly_name}")
+    if model and model != display_name:
+        lines.append(f"Model: {model}")
+    if capabilities:
+        lines.append("Caps: " + ", ".join(str(item) for item in capabilities[:4]))
+    lines.append("Sound: muted" if muted else "Sound: on")
     if pending:
-        status += f" Awaiting {pending.get('slot', 'input')}."
+        lines.append(f"Awaiting: {pending.get('slot', 'input')}")
+
     return apply_mute_state(device_id, base_response(
         True,
         text,
-        status,
-        "success",
+        "\n".join(lines),
+        "success" if online else "error",
         command="status",
-        state={"muted": muted, "global_muted": GLOBAL_MUTED, "pending": pending is not None},
+        state={
+            "target_id": target_id,
+            "friendly_name": friendly_name,
+            "display_name": display_name,
+            "online": online,
+            "online_detail": detail,
+            "ip": ip,
+            "type": device_type,
+            "model": model,
+            "capabilities": capabilities,
+            "muted": muted,
+            "global_muted": GLOBAL_MUTED,
+            "pending": pending is not None,
+        },
     ))
 
 
