@@ -121,6 +121,7 @@ static const char *TAG = "waveshare_c6";
 #define COMMAND_TEXT_MAX 192
 #define HTTP_CHUNK_HEADER_MAX 16
 #define DEVICE_EVENTS_URL_MAX 192
+#define DEVICE_REGISTER_URL_MAX 192
 #define TONE_CHUNK_FRAMES 128
 #define WIFI_CONNECT_TIMEOUT_MS 12000
 #define WIFI_CONNECTED_BIT BIT(0)
@@ -1278,6 +1279,66 @@ static void build_device_events_url(char *url, size_t url_size)
     snprintf(url + used, url_size - used, "/devices/%s/events", s_device_id);
 }
 
+static void build_device_register_url(char *url, size_t url_size)
+{
+    strlcpy(url, CONFIG_SPOKEN_COMMAND_SERVER_URL, url_size);
+    char *path = strstr(url, "/audio/command");
+    if (path != NULL) {
+        *path = '\0';
+    }
+    size_t used = strlen(url);
+    snprintf(url + used, url_size - used, "/devices/%s/register", s_device_id);
+}
+
+static esp_err_t register_device_metadata(void)
+{
+    if (!s_wifi_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char url[DEVICE_REGISTER_URL_MAX] = {0};
+    build_device_register_url(url, sizeof(url));
+
+    const char *body =
+        "{"
+        "\"type\":\"voice-controller\","
+        "\"model\":\"Waveshare ESP32-C6 Touch AMOLED 1.8\","
+        "\"capabilities\":[\"microphone\",\"display\",\"touch\",\"speaker\",\"button\",\"imu\",\"battery\",\"command-audio\",\"device-events\"],"
+        "\"status\":{"
+        "\"target\":\"" CONFIG_IDF_TARGET "\","
+        "\"display\":\"SH8601 AMOLED 368x448\","
+        "\"microphone\":\"ES8311/I2S\","
+        "\"imu\":\"QMI8658\","
+        "\"power\":\"AXP2101\""
+        "}"
+        "}";
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    ESP_RETURN_ON_FALSE(client != NULL, ESP_ERR_NO_MEM, TAG, "create registration HTTP client");
+
+    ESP_LOGI(TAG, "Registering device metadata at %s", url);
+    ESP_RETURN_ON_ERROR(esp_http_client_set_method(client, HTTP_METHOD_POST), TAG, "set registration method");
+    ESP_RETURN_ON_ERROR(esp_http_client_set_header(client, "Content-Type", "application/json"), TAG, "set registration content type");
+    ESP_RETURN_ON_ERROR(esp_http_client_set_post_field(client, body, strlen(body)), TAG, "set registration body");
+
+    esp_err_t ret = esp_http_client_perform(client);
+    if (ret == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "Device metadata registration status=%d", status);
+        if (status < 200 || status >= 300) {
+            ret = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGW(TAG, "Device metadata registration failed: %s", esp_err_to_name(ret));
+    }
+    esp_http_client_cleanup(client);
+    return ret;
+}
+
 static void render_alert_event(esp_lcd_panel_handle_t panel, esp_lcd_touch_handle_t touch,
                                const char *display_text, const char *tone)
 {
@@ -1745,6 +1806,11 @@ void app_main(void)
     esp_err_t wifi_ret = wifi_init_sta();
     if (wifi_ret != ESP_OK) {
         ESP_LOGW(TAG, "Wi-Fi startup incomplete: %s", esp_err_to_name(wifi_ret));
+    } else {
+        esp_err_t register_ret = register_device_metadata();
+        if (register_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Device metadata registration incomplete: %s", esp_err_to_name(register_ret));
+        }
     }
     ESP_LOGI(TAG, "Microphone level visualization ready; press PWR for PMU shutdown or hold BOOT for command capture");
     ESP_ERROR_CHECK(axp2101_clear_power_irqs());

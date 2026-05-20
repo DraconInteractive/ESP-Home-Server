@@ -274,14 +274,35 @@ def clean_device_id(device_id: str) -> str:
     return cleaned[:64] or "unknown"
 
 
+def default_device_metadata(device_id: str) -> dict[str, Any]:
+    if device_id.startswith("waveshare-c6-"):
+        return {
+            "type": "voice-controller",
+            "model": "Waveshare ESP32-C6 Touch AMOLED 1.8",
+            "capabilities": [
+                "microphone",
+                "display",
+                "touch",
+                "speaker",
+                "button",
+                "imu",
+                "battery",
+                "command-audio",
+                "device-events",
+            ],
+        }
+    return {}
+
+
 def public_device(device_id: str) -> dict[str, Any]:
     device = DEVICES.get(device_id, {})
+    defaults = default_device_metadata(device_id)
     pending = PENDING_ACTIONS.get(device_id)
     return {
         "id": device_id,
-        "type": device.get("type", "unknown"),
-        "model": device.get("model", ""),
-        "capabilities": device.get("capabilities", []),
+        "type": device.get("type") or defaults.get("type", "unknown"),
+        "model": device.get("model") or defaults.get("model", ""),
+        "capabilities": device.get("capabilities") or defaults.get("capabilities", []),
         "endpoints": device.get("endpoints", {}),
         "status": device.get("status", {}),
         "first_seen": device.get("first_seen"),
@@ -305,6 +326,8 @@ def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None) 
         "first_seen": now,
         "request_count": 0,
     })
+    for key, value in default_device_metadata(device_id).items():
+        device.setdefault(key, value)
     device["last_seen"] = now
     device["request_count"] = int(device.get("request_count", 0)) + 1
     if handler is not None:
