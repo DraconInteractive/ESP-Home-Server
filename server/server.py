@@ -1562,6 +1562,330 @@ DASHBOARD_HTML = """<!doctype html>
 """
 
 
+CAMERAS_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Camera Grid</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #18202a;
+      --muted: #687383;
+      --line: #dce2ea;
+      --good: #167a46;
+      --bad: #b42318;
+      --accent: #2458a6;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111418;
+        --panel: #1a1f26;
+        --text: #edf1f7;
+        --muted: #9aa5b5;
+        --line: #303946;
+        --good: #4ec98a;
+        --bad: #ff7b72;
+        --accent: #78a8ff;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 650;
+    }
+    main {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    button, select {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      height: 34px;
+      padding: 0 12px;
+      border-radius: 6px;
+    }
+    button { cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    a:hover { text-decoration: underline; }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 3px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+      align-items: start;
+    }
+    .camera {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .frame {
+      position: relative;
+      background: #05070a;
+      aspect-ratio: 4 / 3;
+      display: grid;
+      place-items: center;
+    }
+    .frame img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .frame .empty {
+      color: #c5cedb;
+      padding: 18px;
+      text-align: center;
+    }
+    .info {
+      display: grid;
+      gap: 4px;
+      padding: 12px;
+    }
+    .title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .device-id {
+      font-weight: 650;
+      word-break: break-word;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      white-space: nowrap;
+      font-size: 12px;
+    }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--bad);
+    }
+    .online .dot { background: var(--good); }
+    .links {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+    .empty-page {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      padding: 22px;
+    }
+    @media (max-width: 760px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .toolbar {
+        justify-content: flex-start;
+      }
+      main {
+        padding: 14px;
+      }
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Camera Grid</h1>
+      <div class="meta" id="serverMeta">Loading camera feeds</div>
+    </div>
+    <div class="toolbar">
+      <label>
+        Feed
+        <select id="feedMode">
+          <option value="video">Video</option>
+          <option value="stream">Combined stream</option>
+          <option value="capture">Capture</option>
+        </select>
+      </label>
+      <span id="refreshState">Waiting for first refresh</span>
+      <button id="refreshButton" type="button">Refresh</button>
+      <a href="/dashboard">Dashboard</a>
+    </div>
+  </header>
+  <main>
+    <section class="grid" id="cameraGrid"></section>
+  </main>
+  <script>
+    const state = {
+      refreshMs: 5000,
+      captureRefreshMs: 1500,
+      captureTimer: null,
+      lastDevices: [],
+    };
+
+    function text(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      return String(value);
+    }
+
+    function el(tag, className, content) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (content !== undefined) node.textContent = content;
+      return node;
+    }
+
+    function preferredEndpoint(device, mode) {
+      const proxy = device.proxy_endpoints || {};
+      if (mode === "capture") return proxy.capture || null;
+      if (mode === "video") return proxy.video || proxy.stream || proxy.capture || null;
+      return proxy.stream || proxy.video || proxy.capture || null;
+    }
+
+    function cameraDevices(devices) {
+      return (devices || []).filter((device) => {
+        const proxy = device.proxy_endpoints || {};
+        return proxy.capture || proxy.video || proxy.stream;
+      });
+    }
+
+    function link(name, url) {
+      const item = el("a", "", name);
+      item.href = url;
+      item.target = "_blank";
+      item.rel = "noreferrer";
+      return item;
+    }
+
+    function render(data) {
+      state.lastDevices = cameraDevices(data.devices);
+      document.getElementById("serverMeta").textContent =
+        `${state.lastDevices.length} camera-capable device(s) | server ${data.server.host}:${data.server.port}`;
+      renderGrid();
+      document.getElementById("refreshState").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
+
+    function renderGrid() {
+      const mode = document.getElementById("feedMode").value;
+      const root = document.getElementById("cameraGrid");
+      root.replaceChildren();
+      clearInterval(state.captureTimer);
+      state.captureTimer = null;
+
+      if (!state.lastDevices.length) {
+        root.append(el("div", "empty-page", "No registered devices currently expose camera endpoints."));
+        return;
+      }
+
+      for (const device of state.lastDevices) {
+        const url = preferredEndpoint(device, mode);
+        const card = el("article", "camera");
+        const frame = el("div", "frame");
+        if (url) {
+          const img = document.createElement("img");
+          img.alt = `${device.id} ${mode}`;
+          img.dataset.baseSrc = url;
+          img.src = mode === "capture" ? `${url}?t=${Date.now()}` : url;
+          frame.append(img);
+        } else {
+          frame.append(el("div", "empty", `No ${mode} endpoint exposed.`));
+        }
+
+        const info = el("div", "info");
+        const title = el("div", "title-row");
+        title.append(el("div", "device-id", device.id));
+        const status = el("span", `status ${device.online ? "online" : ""}`);
+        status.append(el("span", "dot"));
+        status.append(el("span", "", device.online ? "Online" : "Offline"));
+        title.append(status);
+        info.append(title);
+        info.append(el("div", "meta", `${text(device.display_name)} | ${text(device.ip)} | ${text(device.online_detail)}`));
+        const links = el("div", "links");
+        const proxy = device.proxy_endpoints || {};
+        for (const name of ["capture", "video", "stream"]) {
+          if (proxy[name]) links.append(link(name, proxy[name]));
+        }
+        info.append(links);
+        card.append(frame, info);
+        root.append(card);
+      }
+
+      if (mode === "capture") {
+        state.captureTimer = setInterval(() => {
+          for (const img of document.querySelectorAll("img[data-base-src]")) {
+            img.src = `${img.dataset.baseSrc}?t=${Date.now()}`;
+          }
+        }, state.captureRefreshMs);
+      }
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/dashboard-data", {cache: "no-store"});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        render(await response.json());
+      } catch (error) {
+        document.getElementById("refreshState").textContent = `Refresh failed: ${error.message}`;
+      }
+    }
+
+    document.getElementById("refreshButton").addEventListener("click", refresh);
+    document.getElementById("feedMode").addEventListener("change", renderGrid);
+    refresh();
+    setInterval(refresh, state.refreshMs);
+  </script>
+</body>
+</html>
+"""
+
+
 def dispatch_command(text: str, device_id: str) -> dict[str, Any] | None:
     normalized = normalize_command_text(text)
     for command in COMMANDS:
@@ -1608,6 +1932,9 @@ class CommandHandler(BaseHTTPRequestHandler):
 
         if parsed.path in ("/", "/dashboard"):
             html_response(self, 200, DASHBOARD_HTML)
+            return
+        if parsed.path in ("/cameras", "/camera-grid"):
+            html_response(self, 200, CAMERAS_HTML)
             return
         if parsed.path == "/dashboard-data":
             with STATE_LOCK:

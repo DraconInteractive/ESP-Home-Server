@@ -16,6 +16,8 @@ The server listens on `0.0.0.0:8080` by default.
 ## Endpoints
 
 - `GET /` or `GET /dashboard` opens the local device dashboard.
+- `GET /cameras` or `GET /camera-grid` opens a camera feed grid using proxied
+  device media endpoints.
 - `GET /dashboard-data` returns the dashboard snapshot used by the UI.
 - `GET /health` returns a basic health check.
 - `GET /media/{device_id}/{endpoint}` proxies a registered device media
