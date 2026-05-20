@@ -4,6 +4,7 @@
 !.env.example
 server/.env.local
 server/device-names.json
+server/device-registry.json
 
 # ESP-IDF generated files and local configuration
 firmware/build/

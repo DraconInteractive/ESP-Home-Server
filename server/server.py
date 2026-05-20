@@ -38,6 +38,10 @@ DEVICE_NAMES_PATH = os.environ.get(
     "COMMAND_SERVER_DEVICE_NAMES_PATH",
     os.path.join(os.path.dirname(__file__), "device-names.json"),
 )
+DEVICE_REGISTRY_PATH = os.environ.get(
+    "COMMAND_SERVER_DEVICE_REGISTRY_PATH",
+    os.path.join(os.path.dirname(__file__), "device-registry.json"),
+)
 SERVER_STARTED_AT = int(time.time())
 
 RECENT_COMMANDS: list[dict[str, Any]] = []
@@ -331,7 +335,75 @@ def set_device_friendly_name(device_id: str, name: str) -> dict[str, Any]:
         else:
             DEVICES[cleaned_id].pop("friendly_name", None)
     save_device_friendly_names()
+    save_device_registry()
     return public_device(cleaned_id)
+
+
+def persisted_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "id",
+        "friendly_name",
+        "type",
+        "model",
+        "capabilities",
+        "endpoints",
+        "status",
+        "first_seen",
+        "last_seen",
+        "remote_addr",
+        "user_agent",
+        "request_count",
+        "last_command",
+        "last_transcript",
+        "last_display_text",
+    }
+    result = {key: value for key, value in device.items() if key in allowed}
+    result["id"] = device_id
+    if DEVICE_FRIENDLY_NAMES.get(device_id):
+        result["friendly_name"] = DEVICE_FRIENDLY_NAMES[device_id]
+    return result
+
+
+def load_device_registry() -> None:
+    try:
+        with open(DEVICE_REGISTRY_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load device registry: {exc}")
+        return
+
+    devices = payload.get("devices") if isinstance(payload, dict) else None
+    if not isinstance(devices, dict):
+        return
+
+    for raw_device_id, raw_device in devices.items():
+        if not isinstance(raw_device, dict):
+            continue
+        device_id = clean_device_id(str(raw_device_id))
+        device = persisted_device(device_id, raw_device)
+        device["id"] = device_id
+        device["session_seen"] = False
+        if DEVICE_FRIENDLY_NAMES.get(device_id):
+            device["friendly_name"] = DEVICE_FRIENDLY_NAMES[device_id]
+        DEVICES[device_id] = device
+
+
+def save_device_registry() -> None:
+    directory = os.path.dirname(DEVICE_REGISTRY_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    devices = {
+        device_id: persisted_device(device_id, DEVICES[device_id])
+        for device_id in sorted(DEVICES)
+    }
+    payload = {"devices": devices}
+    temp_path = f"{DEVICE_REGISTRY_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, DEVICE_REGISTRY_PATH)
 
 
 def default_device_metadata(device_id: str) -> dict[str, Any]:
@@ -372,6 +444,7 @@ def public_device(device_id: str) -> dict[str, Any]:
         "remote_addr": device.get("remote_addr"),
         "user_agent": device.get("user_agent", ""),
         "request_count": device.get("request_count", 0),
+        "session_seen": bool(device.get("session_seen", False)),
         "muted": MUTED_DEVICES.get(device_id, False),
         "pending": pending,
         "pending_events": len(DEVICE_EVENTS.get(device_id, [])),
@@ -392,11 +465,13 @@ def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None) 
         device.setdefault(key, value)
     if DEVICE_FRIENDLY_NAMES.get(device_id):
         device["friendly_name"] = DEVICE_FRIENDLY_NAMES[device_id]
+    device["session_seen"] = True
     device["last_seen"] = now
     device["request_count"] = int(device.get("request_count", 0)) + 1
     if handler is not None:
         device["remote_addr"] = handler.client_address[0]
         device["user_agent"] = handler.headers.get("User-Agent", "")
+    save_device_registry()
 
 
 def register_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None) -> dict[str, Any]:
@@ -421,6 +496,7 @@ def register_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRe
             if isinstance(value, (str, int, float, bool)) or value is None
         }
 
+    save_device_registry()
     return public_device(device_id)
 
 
@@ -433,6 +509,7 @@ def update_device_result(device_id: str, response: dict[str, Any]) -> None:
     device["last_command"] = response.get("command")
     device["last_transcript"] = response.get("transcript", "")
     device["last_display_text"] = response.get("display_text", "")
+    save_device_registry()
 
 
 def device_ip(device: dict[str, Any]) -> str:
@@ -499,6 +576,8 @@ def http_device_online(url: str) -> tuple[bool, str]:
 
 
 def recent_device_online(device: dict[str, Any]) -> tuple[bool, str]:
+    if not device.get("session_seen", False):
+        return False, "not seen this session"
     last_seen = device.get("last_seen")
     if not isinstance(last_seen, (int, float)):
         return False, "never seen"
@@ -713,6 +792,7 @@ def remove_device(device_id: str) -> None:
     DEVICE_EVENTS.pop(device_id, None)
     MUTED_DEVICES.pop(device_id, None)
     PENDING_ACTIONS.pop(device_id, None)
+    DEVICE_FRIENDLY_NAMES.pop(device_id, None)
     for key in list(MEDIA_CACHE):
         if key[0] == device_id:
             MEDIA_CACHE.pop(key, None)
@@ -722,6 +802,8 @@ def remove_device(device_id: str) -> None:
                 proxy.stop_requested = True
                 proxy.condition.notify_all()
             MEDIA_STREAMS.pop(key, None)
+    save_device_friendly_names()
+    save_device_registry()
 
 
 def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None) -> dict[str, Any]:
@@ -747,6 +829,7 @@ def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHT
     if isinstance(event["click_count"], (int, float)):
         status["click_count"] = event["click_count"]
     device["status"] = status
+    save_device_registry()
 
     print(
         "Button event: "
@@ -1003,13 +1086,11 @@ def handle_ping(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
         ping_device(candidate_id, dict(DEVICES[candidate_id]))
         for candidate_id in sorted(DEVICES)
     ]
-    removed = [result for result in results if not result["online"]]
-    for result in removed:
-        remove_device(result["id"])
+    offline = [result for result in results if not result["online"]]
 
-    online_count = len(results) - len(removed)
+    online_count = len(results) - len(offline)
     if results:
-        display_text = f"Ping complete. {online_count} online, {len(removed)} removed."
+        display_text = f"Ping complete. {online_count} online, {len(offline)} offline."
     else:
         display_text = "Ping complete. No devices registered."
 
@@ -1017,13 +1098,13 @@ def handle_ping(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
         True,
         text,
         display_text,
-        "success" if not removed else "error",
+        "success" if not offline else "error",
         command="ping",
         state={
             "online_count": online_count,
-            "removed_count": len(removed),
+            "offline_count": len(offline),
             "results": results,
-            "removed": removed,
+            "offline": offline,
             "devices": status_devices(),
         },
     ))
@@ -1242,7 +1323,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("mute", ("mute",), "Disable response tones for this device.", handle_mute),
     Command("unmute", ("unmute",), "Enable response tones for this device.", handle_unmute),
     Command("test", ("test",), "Check that the command server is ready.", handle_test),
-    Command("ping", ("ping", "ping devices", "check devices", "check all devices"), "Check known devices and remove offline entries.", handle_ping),
+    Command("ping", ("ping", "ping devices", "check devices", "check all devices"), "Check known devices and report offline entries.", handle_ping),
     Command("help", ("help", "commands", "what can you do"), "Show available commands.", handle_help),
     Command("status", ("status", "server status"), "Show server/device state.", handle_status),
     Command("list_devices", ("list devices", "devices", "device list", "show devices"), "Show known devices and IP addresses.", handle_list_devices),
@@ -1333,6 +1414,10 @@ DASHBOARD_HTML = """<!doctype html>
     }
     button {
       cursor: pointer;
+    }
+    button.danger {
+      border-color: var(--bad);
+      color: var(--bad);
     }
     input {
       min-width: 0;
@@ -1468,6 +1553,37 @@ DASHBOARD_HTML = """<!doctype html>
       padding: 18px;
       color: var(--muted);
     }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 10;
+    }
+    .modal-backdrop.open {
+      display: flex;
+    }
+    .modal {
+      width: min(420px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 16px 42px rgba(0, 0, 0, 0.28);
+    }
+    .modal h2 {
+      margin: 0 0 8px;
+      font-size: 17px;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 18px;
+    }
     code {
       font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
       font-size: 12px;
@@ -1522,10 +1638,22 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
     </section>
   </main>
+  <div class="modal-backdrop" id="removeModal" role="dialog" aria-modal="true" aria-labelledby="removeTitle">
+    <div class="modal">
+      <h2 id="removeTitle">Remove Device?</h2>
+      <div id="removeMessage">This device will be removed from the server list.</div>
+      <div class="meta">It can appear again if it registers with the server later.</div>
+      <div class="modal-actions">
+        <button id="cancelRemoveButton" type="button">Cancel</button>
+        <button id="confirmRemoveButton" class="danger" type="button">Remove</button>
+      </div>
+    </div>
+  </div>
   <script>
     const state = {
       refreshMs: 5000,
       timer: null,
+      pendingRemoval: null,
     };
 
     function text(value) {
@@ -1651,6 +1779,39 @@ DASHBOARD_HTML = """<!doctype html>
       return form;
     }
 
+    function openRemoveModal(device) {
+      state.pendingRemoval = device;
+      document.getElementById("removeMessage").textContent =
+        `Remove ${text(device.display_name)} (${device.id}) from the server list?`;
+      document.getElementById("removeModal").classList.add("open");
+    }
+
+    function closeRemoveModal() {
+      state.pendingRemoval = null;
+      document.getElementById("removeModal").classList.remove("open");
+    }
+
+    async function removePendingDevice() {
+      const device = state.pendingRemoval;
+      if (!device) return;
+      const button = document.getElementById("confirmRemoveButton");
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Removing";
+      try {
+        const response = await fetch(`/devices/${encodeURIComponent(device.id)}`, {method: "DELETE"});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        closeRemoveModal();
+        await refresh();
+      } catch (error) {
+        button.textContent = "Failed";
+        setTimeout(() => { button.textContent = original; button.disabled = false; }, 1200);
+        return;
+      }
+      button.textContent = original;
+      button.disabled = false;
+    }
+
     function renderDevices(devices) {
       const root = document.getElementById("devices");
       root.replaceChildren();
@@ -1660,7 +1821,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       const table = el("table");
       const thead = document.createElement("thead");
-      thead.innerHTML = "<tr><th>Device</th><th>Status</th><th>Type</th><th>Capabilities</th><th>Endpoints</th><th>Last Result</th></tr>";
+      thead.innerHTML = "<tr><th>Device</th><th>Status</th><th>Type</th><th>Capabilities</th><th>Endpoints</th><th>Last Result</th><th>Actions</th></tr>";
       const tbody = document.createElement("tbody");
       for (const device of devices) {
         const tr = document.createElement("tr");
@@ -1698,7 +1859,14 @@ DASHBOARD_HTML = """<!doctype html>
         tdLast.append(el("div", "", text(device.last_command)));
         tdLast.append(el("div", "meta", text(device.last_display_text)));
 
-        tr.append(tdDevice, tdStatus, tdType, tdCaps, tdEndpoints, tdLast);
+        const tdActions = document.createElement("td");
+        tdActions.dataset.label = "Actions";
+        const removeButton = el("button", "danger", "Remove");
+        removeButton.type = "button";
+        removeButton.addEventListener("click", () => openRemoveModal(device));
+        tdActions.append(removeButton);
+
+        tr.append(tdDevice, tdStatus, tdType, tdCaps, tdEndpoints, tdLast, tdActions);
         tbody.append(tr);
       }
       table.append(thead, tbody);
@@ -1737,6 +1905,10 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function refresh() {
+      if (state.pendingRemoval) {
+        document.getElementById("refreshState").textContent = "Refresh paused for confirmation";
+        return;
+      }
       if (document.activeElement && document.activeElement.closest(".name-form")) {
         document.getElementById("refreshState").textContent = "Refresh paused while editing";
         return;
@@ -1751,6 +1923,11 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     document.getElementById("refreshButton").addEventListener("click", refresh);
+    document.getElementById("cancelRemoveButton").addEventListener("click", closeRemoveModal);
+    document.getElementById("confirmRemoveButton").addEventListener("click", removePendingDevice);
+    document.getElementById("removeModal").addEventListener("click", (event) => {
+      if (event.target.id === "removeModal") closeRemoveModal();
+    });
     refresh();
     state.timer = setInterval(refresh, state.refreshMs);
   </script>
@@ -2323,12 +2500,24 @@ class CommandHandler(BaseHTTPRequestHandler):
                 "error": str(exc),
             })
 
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/devices/"):
+            device_id = clean_device_id(parsed.path.removeprefix("/devices/"))
+            with STATE_LOCK:
+                existed = device_id in DEVICES or device_id in DEVICE_FRIENDLY_NAMES
+                remove_device(device_id)
+            json_response(self, 200, {"ok": True, "device_id": device_id, "removed": existed})
+            return
+        json_response(self, 404, {"error": "not found"})
+
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"{self.address_string()} - {fmt % args}")
 
 
 def main() -> None:
     load_device_friendly_names()
+    load_device_registry()
     server = ThreadingHTTPServer((HOST, PORT), CommandHandler)
     print(f"Listening on http://{HOST}:{PORT}")
     print("POST audio to /audio/command with ELEVENLABS_API_KEY set in the environment.")

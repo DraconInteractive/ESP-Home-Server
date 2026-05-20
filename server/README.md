@@ -26,6 +26,9 @@ The server listens on `0.0.0.0:8080` by default.
   upstream device connection across multiple server clients.
 - `GET /devices` returns known devices and their server-side state.
 - `GET /devices/{device_id}` returns one known device.
+- `DELETE /devices/{device_id}` removes a device from the local historical
+  registry, including any friendly name. If it registers again later it will
+  reappear.
 - `POST /devices/{device_id}/friendly-name` sets or clears the local friendly
   name used by the dashboard and spoken target matching. Example:
 
