@@ -1944,6 +1944,16 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function stateDetails(state) {
+      const details = [];
+      if (!state || typeof state !== "object") return details;
+      if (state.query) details.push(`query: ${state.query}`);
+      if (state.target_id) details.push(`target: ${state.target_id}`);
+      if (state.display_name) details.push(`target name: ${state.display_name}`);
+      if (state.online_detail) details.push(`target status: ${state.online_detail}`);
+      return details;
+    }
+
     function render(data) {
       document.getElementById("serverMeta").textContent =
         `Listening on ${data.server.host}:${data.server.port} | uptime ${uptime(data.server.uptime_seconds)} | stale after ${data.server.device_stale_seconds}s`;
@@ -1951,8 +1961,12 @@ DASHBOARD_HTML = """<!doctype html>
       renderDevices(data.devices);
       renderEvents("commands", data.recent_commands, "No commands recorded.", (item, command) => {
         item.append(el("div", "device-id", text(command.command)));
-        item.append(el("div", "meta", `${text(command.device_id)} | ${text(command.duration_ms)} ms | tone ${text(command.tone)}`));
+        item.append(el("div", "meta", `${text(command.device_id)} | ${text(command.duration_ms)} ms | tone ${text(command.tone)} | ${command.ok ? "ok" : "failed"}`));
+        item.append(el("div", "", `heard: ${text(command.text)}`));
         item.append(el("div", "", text(command.display_text)));
+        for (const detail of stateDetails(command.state)) {
+          item.append(el("div", "meta", detail));
+        }
       });
       renderEvents("buttonEvents", data.recent_button_events, "No button events recorded.", (item, event) => {
         item.append(el("div", "device-id", `${text(event.device_id)} ${text(event.event)}`));
@@ -2530,12 +2544,14 @@ class CommandHandler(BaseHTTPRequestHandler):
 
             started = time.monotonic()
             transcript = transcribe_with_elevenlabs(wav_bytes)
-            device_response = command_response(transcript.get("text", ""), device_id)
+            transcript_text = str(transcript.get("text", ""))
+            device_response = command_response(transcript_text, device_id)
             record = {
                 "device_id": device_id,
                 "received_at": int(time.time()),
                 "duration_ms": int((time.monotonic() - started) * 1000),
-                "text": device_response["transcript"],
+                "ok": bool(device_response.get("ok")),
+                "text": transcript_text,
                 "display_text": device_response["display_text"],
                 "tone": device_response["tone"],
                 "command": device_response.get("command"),
