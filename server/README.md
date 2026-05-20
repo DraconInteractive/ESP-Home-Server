@@ -26,6 +26,15 @@ The server listens on `0.0.0.0:8080` by default.
   upstream device connection across multiple server clients.
 - `GET /devices` returns known devices and their server-side state.
 - `GET /devices/{device_id}` returns one known device.
+- `POST /devices/{device_id}/friendly-name` sets or clears the local friendly
+  name used by the dashboard and spoken target matching. Example:
+
+```sh
+curl -X POST http://127.0.0.1:8080/devices/waveshare-c6-fdda98/friendly-name \
+  -H 'Content-Type: application/json' \
+  --data '{"friendly_name":"Display One"}'
+```
+
 - `GET /devices/{device_id}/events` returns and clears the next queued device
   event.
 - `POST /devices/events` queues an event for all currently known devices.

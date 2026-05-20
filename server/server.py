@@ -34,6 +34,10 @@ DEVICE_PING_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_DEVICE_PING_T
 MEDIA_SNAPSHOT_TTL_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_SNAPSHOT_TTL_SECONDS", "1.0"))
 MEDIA_STREAM_IDLE_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_STREAM_IDLE_SECONDS", "3.0"))
 MEDIA_STREAM_CHUNK_SIZE = int(os.environ.get("COMMAND_SERVER_MEDIA_STREAM_CHUNK_SIZE", "4096"))
+DEVICE_NAMES_PATH = os.environ.get(
+    "COMMAND_SERVER_DEVICE_NAMES_PATH",
+    os.path.join(os.path.dirname(__file__), "device-names.json"),
+)
 SERVER_STARTED_AT = int(time.time())
 
 RECENT_COMMANDS: list[dict[str, Any]] = []
@@ -43,6 +47,7 @@ GLOBAL_MUTED = False
 PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
 DEVICES: dict[str, dict[str, Any]] = {}
 DEVICE_EVENTS: dict[str, list[dict[str, Any]]] = {}
+DEVICE_FRIENDLY_NAMES: dict[str, str] = {}
 MEDIA_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 MEDIA_STREAMS: dict[tuple[str, str], "MediaStreamProxy"] = {}
 STATE_LOCK = threading.RLock()
@@ -274,6 +279,61 @@ def clean_device_id(device_id: str) -> str:
     return cleaned[:64] or "unknown"
 
 
+def clean_friendly_name(name: str) -> str:
+    cleaned = " ".join(str(name).strip().split())
+    return cleaned[:48]
+
+
+def load_device_friendly_names() -> None:
+    try:
+        with open(DEVICE_NAMES_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load device friendly names: {exc}")
+        return
+
+    if not isinstance(payload, dict):
+        return
+    devices = payload.get("devices", payload)
+    if not isinstance(devices, dict):
+        return
+    for device_id, name in devices.items():
+        cleaned_id = clean_device_id(str(device_id))
+        cleaned_name = clean_friendly_name(str(name))
+        if cleaned_name:
+            DEVICE_FRIENDLY_NAMES[cleaned_id] = cleaned_name
+
+
+def save_device_friendly_names() -> None:
+    directory = os.path.dirname(DEVICE_NAMES_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = {"devices": dict(sorted(DEVICE_FRIENDLY_NAMES.items()))}
+    temp_path = f"{DEVICE_NAMES_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, DEVICE_NAMES_PATH)
+
+
+def set_device_friendly_name(device_id: str, name: str) -> dict[str, Any]:
+    cleaned_id = clean_device_id(device_id)
+    cleaned_name = clean_friendly_name(name)
+    if cleaned_name:
+        DEVICE_FRIENDLY_NAMES[cleaned_id] = cleaned_name
+    else:
+        DEVICE_FRIENDLY_NAMES.pop(cleaned_id, None)
+    if cleaned_id in DEVICES:
+        if cleaned_name:
+            DEVICES[cleaned_id]["friendly_name"] = cleaned_name
+        else:
+            DEVICES[cleaned_id].pop("friendly_name", None)
+    save_device_friendly_names()
+    return public_device(cleaned_id)
+
+
 def default_device_metadata(device_id: str) -> dict[str, Any]:
     if device_id.startswith("waveshare-c6-"):
         return {
@@ -297,9 +357,11 @@ def default_device_metadata(device_id: str) -> dict[str, Any]:
 def public_device(device_id: str) -> dict[str, Any]:
     device = DEVICES.get(device_id, {})
     defaults = default_device_metadata(device_id)
+    friendly_name = DEVICE_FRIENDLY_NAMES.get(device_id) or str(device.get("friendly_name", "")).strip()
     pending = PENDING_ACTIONS.get(device_id)
     return {
         "id": device_id,
+        "friendly_name": friendly_name,
         "type": device.get("type") or defaults.get("type", "unknown"),
         "model": device.get("model") or defaults.get("model", ""),
         "capabilities": device.get("capabilities") or defaults.get("capabilities", []),
@@ -328,6 +390,8 @@ def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None) 
     })
     for key, value in default_device_metadata(device_id).items():
         device.setdefault(key, value)
+    if DEVICE_FRIENDLY_NAMES.get(device_id):
+        device["friendly_name"] = DEVICE_FRIENDLY_NAMES[device_id]
     device["last_seen"] = now
     device["request_count"] = int(device.get("request_count", 0)) + 1
     if handler is not None:
@@ -387,6 +451,9 @@ def device_ip(device: dict[str, Any]) -> str:
 
 
 def device_display_name(device_id: str, device: dict[str, Any]) -> str:
+    friendly_name = DEVICE_FRIENDLY_NAMES.get(device_id) or str(device.get("friendly_name", "")).strip()
+    if friendly_name:
+        return friendly_name
     model = str(device.get("model", "")).strip()
     if model:
         return model
@@ -401,6 +468,7 @@ def status_devices() -> list[dict[str, str]]:
         {
             "id": device_id,
             "name": device_display_name(device_id, DEVICES[device_id]),
+            "friendly_name": DEVICE_FRIENDLY_NAMES.get(device_id, ""),
             "type": str(DEVICES[device_id].get("type", "unknown")),
             "ip": device_ip(DEVICES[device_id]),
         }
@@ -472,6 +540,7 @@ def dashboard_device(device_id: str) -> dict[str, Any]:
     public["age_seconds"] = age_seconds
     public["ip"] = device_ip(raw)
     public["display_name"] = device_display_name(device_id, raw)
+    public["friendly_name"] = DEVICE_FRIENDLY_NAMES.get(device_id, public.get("friendly_name", ""))
     public["proxy_endpoints"] = {
         name: f"/media/{device_id}/{name}"
         for name in sorted((public.get("endpoints") or {}).keys())
@@ -1013,11 +1082,16 @@ def handle_alert(text: str, device_id: str, remainder: str) -> dict[str, Any]:
         if device_id not in target_ids:
             target_ids.append(device_id)
     else:
-        target_ids = [device_id]
+        named_target = resolve_device_reference(remainder) or resolve_device_reference(text)
+        target_ids = [named_target or device_id]
 
     if remainder:
         cleaned = re.sub(r"\b(on|to)\s+all\s+devices\b", "", remainder, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\ball\s+devices\b", "", cleaned, flags=re.IGNORECASE).strip()
+        for target_id in target_ids:
+            for name in device_reference_names(target_id, DEVICES.get(target_id, {})):
+                cleaned = re.sub(rf"\b(on|to)\s+{re.escape(name)}\b", "", cleaned, flags=re.IGNORECASE).strip()
+                cleaned = re.sub(rf"\b{re.escape(name)}\b", "", cleaned, flags=re.IGNORECASE).strip()
         if cleaned:
             message = cleaned[:80]
 
@@ -1040,6 +1114,36 @@ def event_capable_device_ids() -> list[str]:
         for candidate_id in sorted(DEVICES)
         if not device_matches_type(candidate_id, DEVICES[candidate_id], "camera")
     ]
+
+
+def device_reference_names(device_id: str, device: dict[str, Any]) -> list[str]:
+    names = [device_id]
+    friendly_name = DEVICE_FRIENDLY_NAMES.get(device_id) or str(device.get("friendly_name", "")).strip()
+    if friendly_name:
+        names.append(friendly_name)
+    display_name = device_display_name(device_id, device)
+    if display_name and display_name not in names:
+        names.append(display_name)
+    return names
+
+
+def resolve_device_reference(text: str, wanted_type: str | None = None) -> str | None:
+    normalized_text = normalize_command_text(text)
+    matches: list[tuple[int, str]] = []
+    for candidate_id, candidate in DEVICES.items():
+        if wanted_type and not device_matches_type(candidate_id, candidate, wanted_type):
+            continue
+        for name in device_reference_names(candidate_id, candidate):
+            normalized_name = normalize_command_text(name.replace("-", " "))
+            if not normalized_name:
+                continue
+            if re.search(rf"\b{re.escape(normalized_name)}\b", normalized_text):
+                matches.append((len(normalized_name), candidate_id))
+                break
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return matches[0][1]
 
 
 def handle_broadcast(text: str, device_id: str, remainder: str) -> dict[str, Any]:
@@ -1068,7 +1172,14 @@ def handle_broadcast(text: str, device_id: str, remainder: str) -> dict[str, Any
 
 
 def device_matches_type(device_id: str, device: dict[str, Any], wanted_type: str) -> bool:
+    capabilities = device.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        capabilities = []
     if device.get("type") == wanted_type:
+        return True
+    if wanted_type == "display" and "display" in capabilities:
+        return True
+    if wanted_type == "camera" and any(capability in capabilities for capability in ("capture", "video", "stream")):
         return True
     if wanted_type == "display" and "display" in device_id:
         return True
@@ -1084,9 +1195,9 @@ def first_device_id(wanted_type: str) -> str | None:
     return None
 
 
-def handle_camera_view(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
-    camera_id = first_device_id("camera")
-    display_id = first_device_id("display")
+def handle_camera_view(text: str, device_id: str, remainder: str) -> dict[str, Any]:
+    camera_id = resolve_device_reference(remainder, "camera") or resolve_device_reference(text, "camera") or first_device_id("camera")
+    display_id = resolve_device_reference(remainder, "display") or resolve_device_reference(text, "display") or first_device_id("display")
     if not camera_id or not display_id:
         return apply_mute_state(device_id, base_response(
             False,
@@ -1212,14 +1323,19 @@ DASHBOARD_HTML = """<!doctype html>
       color: var(--muted);
       flex-wrap: wrap;
     }
-    button {
+    button, input {
       border: 1px solid var(--line);
       background: var(--panel);
       color: var(--text);
       height: 34px;
       padding: 0 12px;
       border-radius: 6px;
+    }
+    button {
       cursor: pointer;
+    }
+    input {
+      min-width: 0;
     }
     button:hover { border-color: var(--accent); }
     .stats {
@@ -1319,6 +1435,19 @@ DASHBOARD_HTML = """<!doctype html>
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
+    }
+    .name-form {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+      max-width: 320px;
+    }
+    .name-form input {
+      flex: 1;
+      width: 100%;
+    }
+    .name-form button {
+      flex: 0 0 auto;
     }
     a {
       color: var(--accent);
@@ -1482,6 +1611,46 @@ DASHBOARD_HTML = """<!doctype html>
       return wrap;
     }
 
+    async function saveFriendlyName(deviceId, input, button) {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Saving";
+      try {
+        const response = await fetch(`/devices/${encodeURIComponent(deviceId)}/friendly-name`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({friendly_name: input.value}),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        input.blur();
+        await refresh();
+      } catch (error) {
+        button.textContent = "Failed";
+        setTimeout(() => { button.textContent = original; button.disabled = false; }, 1200);
+        return;
+      }
+      button.textContent = original;
+      button.disabled = false;
+    }
+
+    function friendlyNameForm(device) {
+      const form = el("form", "name-form");
+      const input = document.createElement("input");
+      input.type = "text";
+      input.maxLength = 48;
+      input.placeholder = "Friendly name";
+      input.value = device.friendly_name || "";
+      input.autocomplete = "off";
+      const button = el("button", "", "Save");
+      button.type = "submit";
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        saveFriendlyName(device.id, input, button);
+      });
+      form.append(input, button);
+      return form;
+    }
+
     function renderDevices(devices) {
       const root = document.getElementById("devices");
       root.replaceChildren();
@@ -1499,6 +1668,7 @@ DASHBOARD_HTML = """<!doctype html>
         tdDevice.dataset.label = "Device";
         tdDevice.append(el("div", "device-id", device.id));
         tdDevice.append(el("div", "meta", `${text(device.display_name)} | ${text(device.ip)}`));
+        tdDevice.append(friendlyNameForm(device));
 
         const tdStatus = document.createElement("td");
         tdStatus.dataset.label = "Status";
@@ -1567,6 +1737,10 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function refresh() {
+      if (document.activeElement && document.activeElement.closest(".name-form")) {
+        document.getElementById("refreshState").textContent = "Refresh paused while editing";
+        return;
+      }
       try {
         const response = await fetch("/dashboard-data", {cache: "no-store"});
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2059,6 +2233,20 @@ class CommandHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
 
+        if parsed.path.startswith("/devices/") and parsed.path.endswith("/friendly-name"):
+            device_id = clean_device_id(parsed.path.removeprefix("/devices/").removesuffix("/friendly-name"))
+            try:
+                body = read_request_body(self)
+                payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("friendly-name body must be a JSON object")
+                with STATE_LOCK:
+                    device = set_device_friendly_name(device_id, str(payload.get("friendly_name", "")))
+                json_response(self, 200, {"ok": True, "device": device})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
         if parsed.path.startswith("/devices/") and parsed.path.endswith("/button"):
             device_id = clean_device_id(parsed.path.removeprefix("/devices/").removesuffix("/button"))
             try:
@@ -2140,6 +2328,7 @@ class CommandHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    load_device_friendly_names()
     server = ThreadingHTTPServer((HOST, PORT), CommandHandler)
     print(f"Listening on http://{HOST}:{PORT}")
     print("POST audio to /audio/command with ELEVENLABS_API_KEY set in the environment.")
