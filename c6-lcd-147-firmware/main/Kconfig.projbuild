@@ -1,0 +1,21 @@
+menu "Waveshare ESP32-C6 LCD 1.47"
+
+config C6_LCD147_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Home Wi-Fi network SSID used by the Waveshare ESP32-C6-LCD-1.47 node.
+
+config C6_LCD147_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Home Wi-Fi password. Leave empty for an open network.
+
+config C6_LCD147_SERVER_URL
+    string "Command server base URL"
+    default "http://192.168.4.20:8080"
+    help
+        Base URL for the local command server, without a trailing slash.
+
+endmenu

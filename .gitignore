@@ -31,6 +31,16 @@ esp-eye-firmware/managed_components/
 esp-eye-firmware/dependencies.lock
 esp-eye-firmware/sdkconfig
 esp-eye-firmware/sdkconfig.old
+c6-lcd-147-firmware/build/
+c6-lcd-147-firmware/managed_components/
+c6-lcd-147-firmware/dependencies.lock
+c6-lcd-147-firmware/sdkconfig
+c6-lcd-147-firmware/sdkconfig.old
+nesso-n1-firmware/build/
+nesso-n1-firmware/managed_components/
+nesso-n1-firmware/dependencies.lock
+nesso-n1-firmware/sdkconfig
+nesso-n1-firmware/sdkconfig.old
 
 # Python generated files
 __pycache__/

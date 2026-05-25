@@ -1,0 +1,21 @@
+menu "Arduino Nesso N1"
+
+config NESSO_N1_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Home Wi-Fi network SSID used by the Arduino Nesso N1 node.
+
+config NESSO_N1_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Home Wi-Fi password. Leave empty for an open network.
+
+config NESSO_N1_SERVER_URL
+    string "Command server base URL"
+    default "http://192.168.4.20:8080"
+    help
+        Base URL for the local command server, without a trailing slash.
+
+endmenu
