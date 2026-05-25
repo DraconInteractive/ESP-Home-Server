@@ -1,0 +1,61 @@
+{
+  "actions": [
+    {
+      "name": "server time",
+      "aliases": [
+        "server time",
+        "show server time",
+        "get server time"
+      ],
+      "description": "Return the server's current date and time.",
+      "script": "server-time.sh",
+      "timeout_seconds": 5,
+      "requires_confirmation": false
+    },
+    {
+      "name": "send email",
+      "aliases": [
+        "send email",
+        "send an email",
+        "email"
+      ],
+      "description": "Send an email through the configured SMTP account.",
+      "script": "send-email.py",
+      "timeout_seconds": 20,
+      "requires_confirmation": true
+    },
+    {
+      "name": "send test email",
+      "aliases": [
+        "send test email",
+        "test email",
+        "email test"
+      ],
+      "description": "Send a fixed test email to the configured test recipient.",
+      "script": "send-email.py",
+      "args": [
+        "--to",
+        "rarceth@gmail.com",
+        "--subject",
+        "Test",
+        "--message",
+        "This is a test"
+      ],
+      "timeout_seconds": 20,
+      "requires_confirmation": true
+    },
+    {
+      "name": "notify phone",
+      "aliases": [
+        "notify phone",
+        "send notification",
+        "phone notification",
+        "notify android"
+      ],
+      "description": "Send an Android notification through ntfy.",
+      "script": "notify-phone.py",
+      "timeout_seconds": 10,
+      "requires_confirmation": false
+    }
+  ]
+}

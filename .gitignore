@@ -5,6 +5,12 @@
 server/.env.local
 server/device-names.json
 server/device-registry.json
+server/server.pid
+server/server.log
+server/server-state.sqlite3
+server/server-state.sqlite3-*
+server/firmware-catalog.json
+server/firmware-catalog/
 
 # ESP-IDF generated files and local configuration
 firmware/build/

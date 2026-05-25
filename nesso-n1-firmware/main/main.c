@@ -27,6 +27,9 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "nesso_n1";
+#define FIRMWARE_PROJECT "nesso-n1-firmware"
+#define FIRMWARE_VERSION "0.0.1d"
+#define FIRMWARE_DEVICE_TYPE "arduino-nesso-n1"
 
 #define LCD_HOST SPI2_HOST
 #define LCD_H_RES 135
@@ -651,13 +654,20 @@ static void register_with_server(void)
     }
 
     char path[96] = {0};
-    char body[900] = {0};
+    char body[1200] = {0};
     int status = 0;
     snprintf(path, sizeof(path), "/devices/%s/register", s_device_id);
     snprintf(body, sizeof(body),
              "{"
              "\"type\":\"display\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
              "\"model\":\"Arduino Nesso N1\","
+             "\"firmware\":{"
+             "\"project\":\"" FIRMWARE_PROJECT "\","
+             "\"version\":\"" FIRMWARE_VERSION "\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
+             "\"target\":\"%s\""
+             "},"
              "\"capabilities\":[\"display\",\"alert\",\"device-events\",\"touch\",\"button\",\"imu\",\"battery\",\"buzzer\",\"ir\",\"qwiic\",\"grove\",\"lora-disabled\"],"
              "\"status\":{"
              "\"ip\":\"%s\","
@@ -675,6 +685,7 @@ static void register_with_server(void)
              "\"ir_gpio\":9"
              "}"
              "}",
+             CONFIG_IDF_TARGET,
              s_ip_addr,
              CONFIG_IDF_TARGET,
              s_battery_pct,

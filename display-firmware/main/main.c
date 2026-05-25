@@ -28,6 +28,9 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "display_node";
+#define FIRMWARE_PROJECT "display-firmware"
+#define FIRMWARE_VERSION "0.0.1d"
+#define FIRMWARE_DEVICE_TYPE "waveshare-c3-round-display"
 
 #define LCD_HOST SPI2_HOST
 #define I2C_PORT I2C_NUM_0
@@ -74,6 +77,7 @@ static EventGroupHandle_t s_wifi_event_group;
 static int s_wifi_retry_count;
 static bool s_wifi_ready;
 static char s_device_id[48] = "waveshare-c3-display-unknown";
+static char s_ip_addr[16] = "0.0.0.0";
 static esp_lcd_panel_io_handle_t s_lcd_io;
 static SemaphoreHandle_t s_color_done;
 static uint16_t s_line_buffer[LCD_H_RES];
@@ -717,6 +721,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_wifi_retry_count = 0;
         s_wifi_ready = true;
+        snprintf(s_ip_addr, sizeof(s_ip_addr), IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "Wi-Fi connected ip=" IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -789,6 +794,56 @@ static bool extract_json_string(const char *json, const char *key, char *out, si
     return i > 0;
 }
 
+static void register_with_server(void)
+{
+    if (!s_wifi_ready || strlen(CONFIG_DISPLAY_NODE_SERVER_URL) == 0) {
+        return;
+    }
+
+    char url[192] = {0};
+    char body[900] = {0};
+    snprintf(url, sizeof(url), "%s/devices/%s/register", CONFIG_DISPLAY_NODE_SERVER_URL, s_device_id);
+    snprintf(body, sizeof(body),
+             "{"
+             "\"type\":\"display\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
+             "\"model\":\"ESP32-2424S012 round LCD\","
+             "\"firmware\":{"
+             "\"project\":\"" FIRMWARE_PROJECT "\","
+             "\"version\":\"" FIRMWARE_VERSION "\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
+             "\"target\":\"" CONFIG_IDF_TARGET "\""
+             "},"
+             "\"capabilities\":[\"display\",\"alert\",\"device-events\",\"touch\",\"camera-view\"],"
+             "\"status\":{"
+             "\"ip\":\"%s\","
+             "\"display\":\"GC9A01 240x240\","
+             "\"touch\":\"CST816S\""
+             "}"
+             "}",
+             s_ip_addr);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 2500,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        return;
+    }
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, strlen(body));
+    esp_err_t ret = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (ret == ESP_OK && status >= 200 && status < 300) {
+        ESP_LOGI(TAG, "Registered with command server");
+    } else {
+        ESP_LOGW(TAG, "Registration failed: err=%s status=%d", esp_err_to_name(ret), status);
+    }
+}
+
 static void poll_events(void)
 {
     if (!s_wifi_ready) {
@@ -838,11 +893,18 @@ void app_main(void)
     if (wifi_init_sta() != ESP_OK) {
         strlcpy(s_display_text, "Wi-Fi not connected.", sizeof(s_display_text));
         render_home();
+    } else {
+        register_with_server();
     }
 
     int64_t next_poll = 0;
+    int64_t next_register = esp_timer_get_time() + (30LL * 1000LL * 1000LL);
     while (true) {
         int64_t now = esp_timer_get_time();
+        if (s_wifi_ready && now >= next_register) {
+            next_register = now + (30LL * 1000LL * 1000LL);
+            register_with_server();
+        }
         if (now >= next_poll) {
             next_poll = now + EVENT_POLL_INTERVAL_US;
             poll_events();

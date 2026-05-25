@@ -21,6 +21,9 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "button_node";
+#define FIRMWARE_PROJECT "button-node-firmware"
+#define FIRMWARE_VERSION "0.0.1d"
+#define FIRMWARE_DEVICE_TYPE "xiao-button"
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
@@ -82,14 +85,21 @@ static void register_with_server(void)
     }
 
     char path[96] = {0};
-    char body[384] = {0};
+    char body[640] = {0};
     int status = 0;
 
     snprintf(path, sizeof(path), "/devices/%s/register", s_device_id);
     snprintf(body, sizeof(body),
              "{"
              "\"type\":\"button\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
              "\"model\":\"Seeed XIAO ESP32-C3\","
+             "\"firmware\":{"
+             "\"project\":\"" FIRMWARE_PROJECT "\","
+             "\"version\":\"" FIRMWARE_VERSION "\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
+             "\"target\":\"%s\""
+             "},"
              "\"capabilities\":[\"button\",\"click\"],"
              "\"status\":{"
              "\"ip\":\"%s\","
@@ -98,6 +108,7 @@ static void register_with_server(void)
              "\"click_count\":%" PRIu32
              "}"
              "}",
+             CONFIG_IDF_TARGET,
              s_ip_addr,
              CONFIG_BUTTON_NODE_BUTTON_GPIO,
              CONFIG_BUTTON_NODE_ACTIVE_LOW ? "true" : "false",

@@ -37,6 +37,9 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "waveshare_c6";
+#define FIRMWARE_PROJECT "firmware"
+#define FIRMWARE_VERSION "0.0.1d"
+#define FIRMWARE_DEVICE_TYPE "waveshare-c6-voice-controller"
 
 #define LCD_HOST SPI2_HOST
 #define I2C_PORT I2C_NUM_0
@@ -1302,7 +1305,14 @@ static esp_err_t register_device_metadata(void)
     const char *body =
         "{"
         "\"type\":\"voice-controller\","
+        "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
         "\"model\":\"Waveshare ESP32-C6 Touch AMOLED 1.8\","
+        "\"firmware\":{"
+        "\"project\":\"" FIRMWARE_PROJECT "\","
+        "\"version\":\"" FIRMWARE_VERSION "\","
+        "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
+        "\"target\":\"" CONFIG_IDF_TARGET "\""
+        "},"
         "\"capabilities\":[\"microphone\",\"display\",\"touch\",\"speaker\",\"button\",\"imu\",\"battery\",\"command-audio\",\"device-events\"],"
         "\"status\":{"
         "\"target\":\"" CONFIG_IDF_TARGET "\","

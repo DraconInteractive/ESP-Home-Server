@@ -25,6 +25,9 @@
 #include "freertos/task.h"
 
 static const char *TAG = "timercam";
+#define FIRMWARE_PROJECT "camera-firmware"
+#define FIRMWARE_VERSION "0.0.1d"
+#define FIRMWARE_DEVICE_TYPE "timercam-x"
 
 // M5Stack TimerCamera-X / ESP32-D0WDQ6-V3 + OV3660 pin map.
 // Source: M5Stack TimerCamera-X docs.
@@ -146,12 +149,19 @@ static void register_with_command_server(void)
     }
 
     char url[192] = {0};
-    char body[640] = {0};
+    char body[900] = {0};
     snprintf(url, sizeof(url), "%s/devices/%s/register", CONFIG_TIMERCAM_COMMAND_SERVER_URL, device_id);
     snprintf(body, sizeof(body),
              "{"
              "\"type\":\"camera\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
              "\"model\":\"M5Stack TimerCamera-X\","
+             "\"firmware\":{"
+             "\"project\":\"" FIRMWARE_PROJECT "\","
+             "\"version\":\"" FIRMWARE_VERSION "\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
+             "\"target\":\"" CONFIG_IDF_TARGET "\""
+             "},"
              "\"capabilities\":[\"capture\",\"stream\"],"
              "\"endpoints\":{"
              "\"root\":\"http://%s/\","

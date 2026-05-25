@@ -25,6 +25,9 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "esp_eye";
+#define FIRMWARE_PROJECT "esp-eye-firmware"
+#define FIRMWARE_VERSION "0.0.1d"
+#define FIRMWARE_DEVICE_TYPE "esp-eye"
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
@@ -145,7 +148,7 @@ static void register_with_server(void)
     }
 
     char path[96] = {0};
-    char body[1024] = {0};
+    char body[1300] = {0};
     int status = 0;
     bool psram_ready = esp_psram_is_initialized();
 
@@ -153,7 +156,14 @@ static void register_with_server(void)
     snprintf(body, sizeof(body),
              "{"
              "\"type\":\"camera\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
              "\"model\":\"ESP-EYE v2.1\","
+             "\"firmware\":{"
+             "\"project\":\"" FIRMWARE_PROJECT "\","
+             "\"version\":\"" FIRMWARE_VERSION "\","
+             "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
+             "\"target\":\"%s\""
+             "},"
              "\"capabilities\":[\"capture\",\"video\",\"stream\",\"microphone\"],"
              "\"endpoints\":{"
              "\"root\":\"http://%s/\","
@@ -173,6 +183,7 @@ static void register_with_server(void)
              "\"stage\":\"camera-audio-http\""
              "}"
              "}",
+             CONFIG_IDF_TARGET,
              s_ip_addr, s_ip_addr, s_ip_addr, s_ip_addr, s_ip_addr,
              s_ip_addr,
              psram_ready ? "true" : "false",

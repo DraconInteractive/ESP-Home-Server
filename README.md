@@ -16,9 +16,14 @@ their role. Cloud use is currently limited to speech-to-text via ElevenLabs.
   controller to the server.
 - Transcribe audio with ElevenLabs Speech to Text.
 - Run a small server-side command registry with multi-turn prompts.
+- Run packaged server-side actions from an allowlisted script registry.
 - Track devices by stable ID and optional friendly name.
+- Report firmware project/version/device type from registered devices.
+- Maintain a local firmware catalog for future OTA rollout.
 - Show registered devices, online/offline state, recent commands, and media
   feeds in a browser dashboard.
+- Show startup diagnostics, active timers, and packaged action test controls in
+  the browser dashboard.
 - Queue events to one device or broadcast events to all known devices.
 - Display alerts and broadcast text on display devices.
 - Proxy camera and audio endpoints through the server so multiple browser
@@ -82,6 +87,21 @@ set +a
 python3 server.py
 ```
 
+For manual restarts over SSH, use:
+
+```sh
+./restart-device-server.sh
+```
+
+On this antiX setup, the repo also includes a runit installer so the server can
+start after reboot:
+
+```sh
+sudo ./install-device-server-service.sh
+sudo sv status spoken-command-server
+sudo sv restart spoken-command-server
+```
+
 Useful server pages:
 
 - `http://<server-ip>:8080/dashboard` - device dashboard.
@@ -91,6 +111,11 @@ Useful server pages:
 Important API surfaces:
 
 - `POST /audio/command` receives WAV or raw PCM command audio.
+- `GET /firmware/catalog` lists known firmware builds by device type.
+- `PUT /firmware/bin/{device_type}/{version}/{filename}` uploads a firmware
+  binary into the local catalog.
+- `GET /actions` lists allowlisted packaged server actions.
+- `POST /actions/{action_name}/run` runs an allowlisted packaged server action.
 - `POST /devices/{device_id}/register` records device metadata.
 - `GET /devices/{device_id}/events` lets polling devices retrieve queued work.
 - `POST /devices/{device_id}/events` queues an event for one device.
@@ -117,6 +142,17 @@ Current commands include:
   on the phrase.
 - `repeat <message>` or `say <message>` - display the spoken suffix.
 - `set timer` - starts a multi-turn prompt if no duration was supplied.
+- `set timer for 5 minutes notify phone` - sends a phone notification when the
+  timer completes.
+- `set timer for 5 minutes alert all devices` - alerts polling display devices
+  when the timer completes.
+- `run action <name>` - runs an allowlisted packaged server-side action.
+- `run action send email to <address> subject <subject> message <message>` -
+  sends an email through the configured SMTP account after confirmation.
+- `run action send test email` - sends the fixed test email action after
+  confirmation.
+- `run action notify phone message <message>` - sends an Android notification
+  through ntfy.
 - `show security camera on display one` - target a camera/display interaction
   using registered devices and friendly names.
 
@@ -212,6 +248,12 @@ Target chips vary by project:
 Use `idf.py set-target <chip>` when creating a fresh build directory or moving
 between device families.
 
+Firmware versions use a semantic base plus a one-letter release channel suffix:
+
+- `d` for development builds, for example `0.0.1d`
+- `s` for staging builds, for example `0.0.1s`
+- `p` for production builds, for example `0.0.1p`
+
 ## Configuration And Secrets
 
 The server uses environment variables from `.env.local`. Firmware projects use
@@ -224,6 +266,10 @@ files should contain values such as:
 - per-device optional settings
 
 Do not commit local credentials or generated build output.
+
+The server persists device names, device registry state, recent command
+history, and recent button events locally under `server/`. Runtime database,
+PID, log, and credential files are ignored by git.
 
 ## Current Limitations
 

@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
 import os
 import re
+import shutil
+import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -21,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 HOST = os.environ.get("COMMAND_SERVER_HOST", "0.0.0.0")
@@ -29,6 +33,7 @@ PORT = int(os.environ.get("COMMAND_SERVER_PORT", "8080"))
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "scribe_v2")
 MAX_AUDIO_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_AUDIO_BYTES", str(4 * 1024 * 1024)))
+MAX_FIRMWARE_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_FIRMWARE_BYTES", str(8 * 1024 * 1024)))
 DEVICE_STALE_SECONDS = int(os.environ.get("COMMAND_SERVER_DEVICE_STALE_SECONDS", "45"))
 DEVICE_PING_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_DEVICE_PING_TIMEOUT_SECONDS", "2.0"))
 MEDIA_SNAPSHOT_TTL_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_SNAPSHOT_TTL_SECONDS", "1.0"))
@@ -42,19 +47,46 @@ DEVICE_REGISTRY_PATH = os.environ.get(
     "COMMAND_SERVER_DEVICE_REGISTRY_PATH",
     os.path.join(os.path.dirname(__file__), "device-registry.json"),
 )
+DATABASE_PATH = os.environ.get(
+    "COMMAND_SERVER_DATABASE_PATH",
+    os.path.join(os.path.dirname(__file__), "server-state.sqlite3"),
+)
+FIRMWARE_CATALOG_PATH = os.environ.get(
+    "COMMAND_SERVER_FIRMWARE_CATALOG_PATH",
+    os.path.join(os.path.dirname(__file__), "firmware-catalog.json"),
+)
+FIRMWARE_BLOB_DIR = os.environ.get(
+    "COMMAND_SERVER_FIRMWARE_BLOB_DIR",
+    os.path.join(os.path.dirname(__file__), "firmware-catalog"),
+)
+ACTION_CONFIG_PATH = os.environ.get(
+    "COMMAND_SERVER_ACTION_CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "actions", "actions.json"),
+)
+ACTION_SCRIPT_DIR = os.environ.get(
+    "COMMAND_SERVER_ACTION_SCRIPT_DIR",
+    os.path.join(os.path.dirname(__file__), "actions"),
+)
+ACTION_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_ACTION_TIMEOUT_SECONDS", "15.0"))
+RECENT_HISTORY_LIMIT = int(os.environ.get("COMMAND_SERVER_RECENT_HISTORY_LIMIT", "100"))
 SERVER_STARTED_AT = int(time.time())
 
 RECENT_COMMANDS: list[dict[str, Any]] = []
 RECENT_BUTTON_EVENTS: list[dict[str, Any]] = []
+ACTIVE_TIMERS: dict[str, dict[str, Any]] = {}
 MUTED_DEVICES: dict[str, bool] = {}
 GLOBAL_MUTED = False
 PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
 DEVICES: dict[str, dict[str, Any]] = {}
 DEVICE_EVENTS: dict[str, list[dict[str, Any]]] = {}
 DEVICE_FRIENDLY_NAMES: dict[str, str] = {}
+FIRMWARE_CATALOG: dict[str, dict[str, Any]] = {}
+SCRIPT_ACTIONS: dict[str, dict[str, Any]] = {}
+SCRIPT_ACTION_ALIASES: dict[str, str] = {}
 MEDIA_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 MEDIA_STREAMS: dict[tuple[str, str], "MediaStreamProxy"] = {}
 STATE_LOCK = threading.RLock()
+TIMER_CONDITION = threading.Condition(STATE_LOCK)
 
 STREAM_ENDPOINT_NAMES = {"video", "stream"}
 MEDIA_ENDPOINT_NAMES = {"capture", "audio", "video", "stream"}
@@ -176,7 +208,7 @@ def binary_response(handler: BaseHTTPRequestHandler, status: int, content_type: 
     handler.wfile.write(body)
 
 
-def read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
+def read_request_body(handler: BaseHTTPRequestHandler, max_bytes: int = MAX_AUDIO_BYTES) -> bytes:
     if handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
         chunks: list[bytes] = []
         total = 0
@@ -191,8 +223,8 @@ def read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
                 handler.rfile.readline(2)
                 break
             total += chunk_size
-            if total > MAX_AUDIO_BYTES:
-                raise ValueError(f"audio body too large: {total} bytes")
+            if total > max_bytes:
+                raise ValueError(f"request body too large: {total} bytes")
             chunks.append(handler.rfile.read(chunk_size))
             if handler.rfile.read(2) != b"\r\n":
                 raise ValueError("invalid chunk terminator")
@@ -202,9 +234,22 @@ def read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
     content_length = int(handler.headers.get("Content-Length", "0"))
     if content_length <= 0:
         raise ValueError("missing request body")
-    if content_length > MAX_AUDIO_BYTES:
-        raise ValueError(f"audio body too large: {content_length} bytes")
+    if content_length > max_bytes:
+        raise ValueError(f"request body too large: {content_length} bytes")
     return handler.rfile.read(content_length)
+
+
+def read_optional_json_body(handler: BaseHTTPRequestHandler, max_bytes: int = MAX_AUDIO_BYTES) -> dict[str, Any]:
+    content_length = int(handler.headers.get("Content-Length", "0"))
+    if content_length <= 0 and handler.headers.get("Transfer-Encoding", "").lower() != "chunked":
+        return {}
+    body = read_request_body(handler, max_bytes)
+    if not body:
+        return {}
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+    return payload
 
 
 def pcm_s16le_to_wav(pcm: bytes, sample_rate: int, channels: int) -> bytes:
@@ -288,6 +333,506 @@ def clean_friendly_name(name: str) -> str:
     return cleaned[:48]
 
 
+def clean_device_type(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", str(value).strip().lower())
+    return cleaned[:64] or "unknown"
+
+
+def clean_version(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.:+-]+", "-", str(value).strip())
+    return cleaned[:80] or str(int(time.time()))
+
+
+def clean_filename(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "-", os.path.basename(str(value).strip()))
+    return cleaned[:120] or "firmware.bin"
+
+
+def clean_action_name(value: str) -> str:
+    cleaned = normalize_command_text(str(value))
+    cleaned = re.sub(r"[^a-z0-9 _.-]+", "", cleaned)
+    return " ".join(cleaned.split())[:80]
+
+
+def action_public_metadata(name: str, action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "aliases": action.get("aliases", []),
+        "description": action.get("description", ""),
+        "timeout_seconds": action.get("timeout_seconds", ACTION_TIMEOUT_SECONDS),
+        "requires_confirmation": bool(action.get("requires_confirmation", False)),
+    }
+
+
+def path_status(path: str) -> dict[str, Any]:
+    directory = path if os.path.isdir(path) else os.path.dirname(path)
+    return {
+        "path": path,
+        "exists": os.path.exists(path),
+        "directory": directory,
+        "directory_exists": os.path.isdir(directory),
+        "directory_writable": os.access(directory or ".", os.W_OK),
+    }
+
+
+def startup_diagnostics() -> list[dict[str, Any]]:
+    checks = [
+        {
+            "name": "ElevenLabs API key",
+            "ok": bool(os.environ.get("ELEVENLABS_API_KEY")),
+            "detail": "configured" if os.environ.get("ELEVENLABS_API_KEY") else "ELEVENLABS_API_KEY is not set",
+        },
+        {
+            "name": "Device registry",
+            "ok": path_status(DEVICE_REGISTRY_PATH)["directory_writable"],
+            "detail": DEVICE_REGISTRY_PATH,
+        },
+        {
+            "name": "SQLite state",
+            "ok": path_status(DATABASE_PATH)["directory_writable"],
+            "detail": DATABASE_PATH,
+        },
+        {
+            "name": "Actions",
+            "ok": bool(SCRIPT_ACTIONS),
+            "detail": f"{len(SCRIPT_ACTIONS)} loaded from {ACTION_CONFIG_PATH}",
+        },
+        {
+            "name": "ntfy",
+            "ok": bool(os.environ.get("COMMAND_SERVER_NTFY_TOPIC")),
+            "detail": "configured" if os.environ.get("COMMAND_SERVER_NTFY_TOPIC") else "COMMAND_SERVER_NTFY_TOPIC is not set",
+        },
+        {
+            "name": "SMTP email",
+            "ok": bool(os.environ.get("COMMAND_SERVER_SMTP_HOST")),
+            "detail": "configured" if os.environ.get("COMMAND_SERVER_SMTP_HOST") else "COMMAND_SERVER_SMTP_HOST is not set",
+        },
+    ]
+    return checks
+
+
+def load_script_actions() -> None:
+    SCRIPT_ACTIONS.clear()
+    SCRIPT_ACTION_ALIASES.clear()
+    try:
+        with open(ACTION_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load server actions: {exc}")
+        return
+
+    entries = payload.get("actions") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return
+
+    base_dir = os.path.realpath(ACTION_SCRIPT_DIR)
+    for raw_action in entries:
+        if not isinstance(raw_action, dict):
+            continue
+        name = clean_action_name(str(raw_action.get("name", "")))
+        script_name = clean_filename(str(raw_action.get("script", "")))
+        if not name or not script_name:
+            continue
+        script_path = os.path.realpath(os.path.join(base_dir, script_name))
+        if os.path.commonpath([base_dir, script_path]) != base_dir:
+            print(f"Skipping action {name}: script path is outside action directory")
+            continue
+        if not os.path.isfile(script_path):
+            print(f"Skipping action {name}: script not found: {script_name}")
+            continue
+        if not os.access(script_path, os.X_OK):
+            print(f"Skipping action {name}: script is not executable: {script_name}")
+            continue
+
+        aliases = []
+        for alias in raw_action.get("aliases", []):
+            cleaned_alias = clean_action_name(str(alias))
+            if cleaned_alias and cleaned_alias not in aliases:
+                aliases.append(cleaned_alias)
+        if name not in aliases:
+            aliases.insert(0, name)
+
+        args = raw_action.get("args", [])
+        if not isinstance(args, list):
+            args = []
+        safe_args = [str(arg)[:200] for arg in args if isinstance(arg, (str, int, float))]
+        try:
+            timeout_seconds = float(raw_action.get("timeout_seconds", ACTION_TIMEOUT_SECONDS))
+        except (TypeError, ValueError):
+            timeout_seconds = ACTION_TIMEOUT_SECONDS
+        timeout_seconds = max(1.0, min(timeout_seconds, 120.0))
+
+        action = {
+            "name": name,
+            "aliases": aliases,
+            "description": str(raw_action.get("description", ""))[:240],
+            "script_path": script_path,
+            "script": script_name,
+            "args": safe_args,
+            "timeout_seconds": timeout_seconds,
+            "requires_confirmation": bool(raw_action.get("requires_confirmation", False)),
+        }
+        SCRIPT_ACTIONS[name] = action
+        for alias in aliases:
+            SCRIPT_ACTION_ALIASES[alias] = name
+
+
+def list_script_actions() -> list[dict[str, Any]]:
+    return [
+        action_public_metadata(name, SCRIPT_ACTIONS[name])
+        for name in sorted(SCRIPT_ACTIONS)
+    ]
+
+
+def resolve_script_action(reference: str) -> str | None:
+    normalized = clean_action_name(reference)
+    if not normalized:
+        return None
+    if normalized in SCRIPT_ACTIONS:
+        return normalized
+    if normalized in SCRIPT_ACTION_ALIASES:
+        return SCRIPT_ACTION_ALIASES[normalized]
+
+    matches: list[tuple[int, str]] = []
+    for alias, name in SCRIPT_ACTION_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", normalized):
+            matches.append((len(alias), name))
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return matches[0][1]
+
+
+def run_script_action(action_name: str, device_id: str, transcript: str) -> dict[str, Any]:
+    action = SCRIPT_ACTIONS.get(action_name)
+    if not action:
+        raise ValueError(f"unknown action: {action_name}")
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "SCD_ACTION_NAME": action_name,
+        "SCD_DEVICE_ID": device_id,
+        "SCD_TRANSCRIPT": transcript,
+    }
+    for key, value in os.environ.items():
+        if key.startswith(("COMMAND_SERVER_SMTP_", "COMMAND_SERVER_EMAIL_", "COMMAND_SERVER_NTFY_")):
+            env[key] = value
+    started = time.monotonic()
+    result = subprocess.run(
+        [action["script_path"], *action.get("args", [])],
+        cwd=ACTION_SCRIPT_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=float(action.get("timeout_seconds", ACTION_TIMEOUT_SECONDS)),
+        check=False,
+    )
+    duration_ms = int((time.monotonic() - started) * 1000)
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    return {
+        "name": action_name,
+        "ok": result.returncode == 0,
+        "returncode": result.returncode,
+        "stdout": stdout[:2000],
+        "stderr": stderr[:2000],
+        "duration_ms": duration_ms,
+    }
+
+
+def infer_device_type(device_id: str, device: dict[str, Any]) -> str:
+    explicit = device.get("device_type") or device.get("firmware_device_type")
+    if explicit:
+        return clean_device_type(str(explicit))
+    if device_id.startswith("waveshare-c6-"):
+        return "waveshare-c6-voice-controller"
+    if device_id.startswith("waveshare-c3-display-"):
+        return "waveshare-c3-round-display"
+    if device_id.startswith("timercam-x-"):
+        return "timercam-x"
+    if device_id.startswith("esp-eye-"):
+        return "esp-eye"
+    if device_id.startswith("xiao-button-"):
+        return "xiao-button"
+    if device_id.startswith("arduino-nesso-n1-"):
+        return "arduino-nesso-n1"
+    if device_id.startswith("waveshare-c6-lcd147-"):
+        return "waveshare-c6-lcd-147"
+    return clean_device_type(str(device.get("type") or "unknown"))
+
+
+def load_firmware_catalog() -> None:
+    try:
+        with open(FIRMWARE_CATALOG_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load firmware catalog: {exc}")
+        return
+
+    entries = payload.get("firmware") if isinstance(payload, dict) else None
+    if not isinstance(entries, dict):
+        return
+    for raw_device_type, raw_entry in entries.items():
+        if isinstance(raw_entry, dict):
+            device_type = clean_device_type(str(raw_device_type))
+            FIRMWARE_CATALOG[device_type] = raw_entry
+
+
+def save_firmware_catalog() -> None:
+    directory = os.path.dirname(FIRMWARE_CATALOG_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = {"firmware": {key: FIRMWARE_CATALOG[key] for key in sorted(FIRMWARE_CATALOG)}}
+    temp_path = f"{FIRMWARE_CATALOG_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, FIRMWARE_CATALOG_PATH)
+
+
+def firmware_catalog_summary() -> list[dict[str, Any]]:
+    result = []
+    for device_type, entry in sorted(FIRMWARE_CATALOG.items()):
+        versions = entry.get("versions", {})
+        if not isinstance(versions, dict):
+            versions = {}
+        latest_version = str(entry.get("latest_version") or "")
+        latest = versions.get(latest_version, {}) if latest_version else {}
+        result.append({
+            "device_type": device_type,
+            "latest_version": latest_version,
+            "version_count": len(versions),
+            "latest": latest if isinstance(latest, dict) else {},
+        })
+    return result
+
+
+def firmware_binary_path(device_type: str, version: str, filename: str) -> str:
+    return os.path.join(FIRMWARE_BLOB_DIR, clean_device_type(device_type), clean_version(version), clean_filename(filename))
+
+
+def add_firmware_catalog_entry(device_type: str, version: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    cleaned_type = clean_device_type(device_type)
+    cleaned_version = clean_version(version)
+    entry = FIRMWARE_CATALOG.setdefault(cleaned_type, {"device_type": cleaned_type, "versions": {}})
+    versions = entry.setdefault("versions", {})
+    if not isinstance(versions, dict):
+        versions = {}
+        entry["versions"] = versions
+
+    record = dict(metadata)
+    record["device_type"] = cleaned_type
+    record["version"] = cleaned_version
+    record["created_at"] = int(record.get("created_at") or time.time())
+    versions[cleaned_version] = record
+    entry["latest_version"] = cleaned_version
+    save_firmware_catalog()
+    return record
+
+
+def remove_firmware_catalog_entry(device_type: str, version: str | None = None) -> bool:
+    cleaned_type = clean_device_type(device_type)
+    entry = FIRMWARE_CATALOG.get(cleaned_type)
+    if not entry:
+        target = os.path.join(FIRMWARE_BLOB_DIR, cleaned_type)
+        had_files = os.path.exists(target)
+        if not version:
+            shutil.rmtree(target, ignore_errors=True)
+        elif version:
+            version_target = os.path.join(target, clean_version(version))
+            had_files = os.path.exists(version_target)
+            shutil.rmtree(version_target, ignore_errors=True)
+        save_firmware_catalog()
+        return had_files
+    if version:
+        cleaned_version = clean_version(version)
+        versions = entry.get("versions", {})
+        if isinstance(versions, dict):
+            removed = versions.pop(cleaned_version, None) is not None
+            if entry.get("latest_version") == cleaned_version:
+                entry["latest_version"] = sorted(versions.keys())[-1] if versions else ""
+            if not versions:
+                FIRMWARE_CATALOG.pop(cleaned_type, None)
+            shutil.rmtree(os.path.join(FIRMWARE_BLOB_DIR, cleaned_type, cleaned_version), ignore_errors=True)
+            save_firmware_catalog()
+            return removed
+        return False
+    FIRMWARE_CATALOG.pop(cleaned_type, None)
+    shutil.rmtree(os.path.join(FIRMWARE_BLOB_DIR, cleaned_type), ignore_errors=True)
+    save_firmware_catalog()
+    return True
+
+
+def db_connect() -> sqlite3.Connection:
+    directory = os.path.dirname(DATABASE_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_database() -> None:
+    with db_connect() as connection:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS command_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                received_at INTEGER NOT NULL,
+                device_id TEXT NOT NULL,
+                duration_ms INTEGER,
+                ok INTEGER NOT NULL,
+                text TEXT,
+                display_text TEXT,
+                tone TEXT,
+                command TEXT,
+                muted INTEGER NOT NULL DEFAULT 0,
+                state_json TEXT NOT NULL DEFAULT '{}',
+                transcript_json TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_command_history_device_time
+            ON command_history(device_id, received_at)
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS button_event_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                received_at INTEGER NOT NULL,
+                device_id TEXT NOT NULL,
+                event TEXT,
+                button TEXT,
+                gpio TEXT,
+                active_low INTEGER,
+                click_count INTEGER,
+                uptime_ms INTEGER,
+                remote_addr TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_button_event_history_device_time
+            ON button_event_history(device_id, received_at)
+        """)
+
+
+def load_recent_history() -> None:
+    with db_connect() as connection:
+        command_rows = connection.execute(
+            """
+            SELECT * FROM command_history
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (RECENT_HISTORY_LIMIT,),
+        ).fetchall()
+        button_rows = connection.execute(
+            """
+            SELECT * FROM button_event_history
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (RECENT_HISTORY_LIMIT,),
+        ).fetchall()
+
+    for row in reversed(command_rows):
+        try:
+            state = json.loads(row["state_json"] or "{}")
+        except json.JSONDecodeError:
+            state = {}
+        try:
+            transcript = json.loads(row["transcript_json"] or "{}")
+        except json.JSONDecodeError:
+            transcript = {}
+        RECENT_COMMANDS.append({
+            "device_id": row["device_id"],
+            "received_at": row["received_at"],
+            "duration_ms": row["duration_ms"],
+            "ok": bool(row["ok"]),
+            "text": row["text"] or "",
+            "display_text": row["display_text"] or "",
+            "tone": row["tone"] or "",
+            "command": row["command"],
+            "state": state,
+            "muted": bool(row["muted"]),
+            "transcript": transcript,
+        })
+
+    for row in reversed(button_rows):
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        event = {
+            "device_id": row["device_id"],
+            "received_at": row["received_at"],
+            "event": row["event"] or "",
+            "button": row["button"] or "",
+            "gpio": payload.get("gpio"),
+            "active_low": bool(row["active_low"]) if row["active_low"] is not None else payload.get("active_low"),
+            "click_count": row["click_count"],
+            "uptime_ms": row["uptime_ms"],
+            "remote_addr": row["remote_addr"],
+        }
+        RECENT_BUTTON_EVENTS.append(event)
+
+
+def save_command_record(record: dict[str, Any]) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO command_history (
+                received_at, device_id, duration_ms, ok, text, display_text,
+                tone, command, muted, state_json, transcript_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(record.get("received_at") or time.time()),
+                clean_device_id(str(record.get("device_id", "unknown"))),
+                record.get("duration_ms"),
+                1 if record.get("ok") else 0,
+                str(record.get("text", "")),
+                str(record.get("display_text", "")),
+                str(record.get("tone", "")),
+                record.get("command"),
+                1 if record.get("muted") else 0,
+                json.dumps(record.get("state", {}), separators=(",", ":")),
+                json.dumps(record.get("transcript", {}), separators=(",", ":")),
+            ),
+        )
+
+
+def save_button_event_record(event: dict[str, Any]) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO button_event_history (
+                received_at, device_id, event, button, gpio, active_low,
+                click_count, uptime_ms, remote_addr, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(event.get("received_at") or time.time()),
+                clean_device_id(str(event.get("device_id", "unknown"))),
+                str(event.get("event", "")),
+                str(event.get("button", "")),
+                None if event.get("gpio") is None else str(event.get("gpio")),
+                None if event.get("active_low") is None else (1 if event.get("active_low") else 0),
+                event.get("click_count"),
+                event.get("uptime_ms"),
+                event.get("remote_addr"),
+                json.dumps(event, separators=(",", ":")),
+            ),
+        )
+
+
 def load_device_friendly_names() -> None:
     try:
         with open(DEVICE_NAMES_PATH, "r", encoding="utf-8") as handle:
@@ -356,6 +901,11 @@ def persisted_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]:
         "last_command",
         "last_transcript",
         "last_display_text",
+        "device_type",
+        "firmware",
+        "firmware_version",
+        "firmware_project",
+        "firmware_build",
     }
     result = {key: value for key, value in device.items() if key in allowed}
     result["id"] = device_id
@@ -436,6 +986,10 @@ def public_device(device_id: str) -> dict[str, Any]:
         "friendly_name": friendly_name,
         "type": device.get("type") or defaults.get("type", "unknown"),
         "model": device.get("model") or defaults.get("model", ""),
+        "device_type": infer_device_type(device_id, device),
+        "firmware": device.get("firmware", {}),
+        "firmware_version": device.get("firmware_version", ""),
+        "firmware_project": device.get("firmware_project", ""),
         "capabilities": device.get("capabilities") or defaults.get("capabilities", []),
         "endpoints": device.get("endpoints", {}),
         "status": device.get("status", {}),
@@ -482,6 +1036,25 @@ def register_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRe
         device["type"] = str(payload.get("type", "unknown"))[:32]
     if "model" in payload:
         device["model"] = str(payload.get("model", ""))[:80]
+    if "device_type" in payload:
+        device["device_type"] = clean_device_type(str(payload.get("device_type", "")))
+    if isinstance(payload.get("firmware"), dict):
+        firmware = {
+            str(key)[:40]: value
+            for key, value in payload["firmware"].items()
+            if isinstance(value, (str, int, float, bool)) or value is None
+        }
+        device["firmware"] = firmware
+        if firmware.get("version") is not None:
+            device["firmware_version"] = str(firmware.get("version", ""))[:80]
+        if firmware.get("project") is not None:
+            device["firmware_project"] = str(firmware.get("project", ""))[:80]
+        if firmware.get("device_type") is not None:
+            device["device_type"] = clean_device_type(str(firmware.get("device_type", "")))
+    if "firmware_version" in payload:
+        device["firmware_version"] = str(payload.get("firmware_version", ""))[:80]
+    if "firmware_project" in payload:
+        device["firmware_project"] = str(payload.get("firmware_project", ""))[:80]
     if isinstance(payload.get("capabilities"), list):
         device["capabilities"] = [str(item)[:40] for item in payload["capabilities"][:16]]
     if isinstance(payload.get("endpoints"), dict):
@@ -650,17 +1223,22 @@ def dashboard_snapshot() -> dict[str, Any]:
             "device_stale_seconds": DEVICE_STALE_SECONDS,
             "media_snapshot_ttl_seconds": MEDIA_SNAPSHOT_TTL_SECONDS,
             "media_stream_idle_seconds": MEDIA_STREAM_IDLE_SECONDS,
+            "diagnostics": startup_diagnostics(),
         },
         "summary": {
             "device_count": len(devices),
             "online_count": online_count,
             "offline_count": len(devices) - online_count,
             "pending_event_count": sum(int(device.get("pending_events", 0)) for device in devices),
+            "active_timer_count": len(ACTIVE_TIMERS),
             "recent_command_count": len(RECENT_COMMANDS),
             "recent_button_event_count": len(RECENT_BUTTON_EVENTS),
             "device_types": device_types,
             "capabilities": capability_counts,
         },
+        "firmware_catalog": firmware_catalog_summary(),
+        "actions": list_script_actions(),
+        "active_timers": active_timer_summary(),
         "devices": devices,
         "recent_commands": RECENT_COMMANDS[-20:],
         "recent_button_events": RECENT_BUTTON_EVENTS[-20:],
@@ -820,7 +1398,8 @@ def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHT
         "remote_addr": DEVICES.get(device_id, {}).get("remote_addr"),
     }
     RECENT_BUTTON_EVENTS.append(event)
-    del RECENT_BUTTON_EVENTS[:-100]
+    del RECENT_BUTTON_EVENTS[:-RECENT_HISTORY_LIMIT]
+    save_button_event_record(event)
 
     device = DEVICES.get(device_id, {})
     status = dict(device.get("status", {})) if isinstance(device.get("status"), dict) else {}
@@ -959,12 +1538,104 @@ def format_duration(seconds: int) -> str:
     return f"{minutes} min {sec} sec"
 
 
-def timer_response(transcript: str, device_id: str, duration_text: str) -> dict[str, Any]:
-    seconds = parse_duration_seconds(duration_text)
+def parse_timer_request(text: str) -> tuple[int | None, str]:
+    normalized = normalize_command_text(text)
+    seconds = parse_duration_seconds(normalized)
+    if "notify phone" in normalized or "phone notification" in normalized or "notification" in normalized:
+        mode = "phone"
+    elif "all devices" in normalized or "standard devices" in normalized or "alert devices" in normalized or "broadcast" in normalized:
+        mode = "all_devices"
+    else:
+        mode = "device"
+    return seconds, mode
+
+
+def timer_mode_label(mode: str) -> str:
+    if mode == "phone":
+        return "phone notification"
+    if mode == "all_devices":
+        return "all devices"
+    return "this device"
+
+
+def schedule_timer(device_id: str, transcript: str, seconds: int, mode: str) -> dict[str, Any]:
+    timer_id = uuid.uuid4().hex
+    now = int(time.time())
+    timer = {
+        "id": timer_id,
+        "device_id": device_id,
+        "created_at": now,
+        "expires_at": now + seconds,
+        "duration_seconds": seconds,
+        "mode": mode,
+        "transcript": transcript,
+    }
+    ACTIVE_TIMERS[timer_id] = timer
+    TIMER_CONDITION.notify_all()
+    return timer
+
+
+def active_timer_summary() -> list[dict[str, Any]]:
+    now = int(time.time())
+    return [
+        {
+            **timer,
+            "remaining_seconds": max(0, int(timer.get("expires_at", now)) - now),
+            "device_name": device_display_name(str(timer.get("device_id", "")), DEVICES.get(str(timer.get("device_id", "")), {})),
+        }
+        for timer in sorted(ACTIVE_TIMERS.values(), key=lambda item: int(item.get("expires_at", 0)))
+    ]
+
+
+def fire_timer(timer: dict[str, Any]) -> None:
+    device_id = str(timer.get("device_id", "unknown"))
+    mode = str(timer.get("mode", "device"))
+    duration = format_duration(int(timer.get("duration_seconds", 0)))
+    message = f"Timer done: {duration}"
+
+    if mode == "phone":
+        try:
+            run_script_action("notify phone", device_id, f"run action notify phone message {message}")
+        except Exception as exc:
+            print(f"Timer notification failed: {exc}")
+        return
+
+    targets = event_capable_device_ids() if mode == "all_devices" else [device_id]
+    for target_id in targets:
+        enqueue_device_event(target_id, "alert", message, "alert", source_device_id=device_id)
+
+
+def timer_worker() -> None:
+    while True:
+        with TIMER_CONDITION:
+            now = int(time.time())
+            due = [
+                ACTIVE_TIMERS.pop(timer_id)
+                for timer_id, timer in list(ACTIVE_TIMERS.items())
+                if int(timer.get("expires_at", now + 1)) <= now
+            ]
+            if not due:
+                next_expiry = min((int(timer.get("expires_at", now + 60)) for timer in ACTIVE_TIMERS.values()), default=now + 60)
+                TIMER_CONDITION.wait(timeout=max(1, min(60, next_expiry - now)))
+                continue
+
+        for timer in due:
+            try:
+                with STATE_LOCK:
+                    fire_timer(timer)
+                    save_device_registry()
+            except Exception as exc:
+                print(f"Timer failed: {exc}")
+
+
+def timer_response(transcript: str, device_id: str, duration_text: str, mode: str = "device") -> dict[str, Any]:
+    seconds, parsed_mode = parse_timer_request(duration_text)
+    mode = parsed_mode if parsed_mode != "device" else mode
     if seconds is None or seconds <= 0:
         PENDING_ACTIONS[device_id] = {
             "command": "timer",
             "slot": "duration",
+            "mode": mode,
             "prompt": "How long should the timer be?",
             "created_at": time.time(),
         }
@@ -974,16 +1645,17 @@ def timer_response(transcript: str, device_id: str, duration_text: str) -> dict[
             "How long should the timer be?",
             "error",
             command="timer",
-            state={"awaiting": "duration"},
+            state={"awaiting": "duration", "mode": mode},
         ))
 
+    timer = schedule_timer(device_id, transcript, seconds, mode)
     return apply_mute_state(device_id, base_response(
         True,
         transcript,
-        f"Timer set: {format_duration(seconds)}",
+        f"Timer set: {format_duration(seconds)} -> {timer_mode_label(mode)}",
         "success",
         command="timer",
-        state={"duration_seconds": seconds, "expires_at": int(time.time() + seconds)},
+        state=timer,
     ))
 
 
@@ -997,10 +1669,24 @@ def handle_pending_action(device_id: str, text: str, normalized: str) -> dict[st
         return None
 
     if pending.get("command") == "timer" and pending.get("slot") == "duration":
-        response = timer_response(text, device_id, text)
+        response = timer_response(text, device_id, text, str(pending.get("mode", "device")))
         if response.get("ok"):
             PENDING_ACTIONS.pop(device_id, None)
         return response
+
+    if pending.get("command") == "script_action" and pending.get("slot") == "confirmation":
+        if normalized not in {"yes", "confirm", "confirmed", "do it", "run it", "go ahead"}:
+            return apply_mute_state(device_id, base_response(
+                False,
+                text,
+                "Please say confirm or cancel.",
+                "error",
+                command="script_action",
+                state={"awaiting": "confirmation", "action": pending.get("action_name")},
+            ))
+        PENDING_ACTIONS.pop(device_id, None)
+        action_name = str(pending.get("action_name", ""))
+        return script_action_response(text, device_id, action_name)
 
     PENDING_ACTIONS.pop(device_id, None)
     return apply_mute_state(device_id, base_response(False, text, "I lost that request.", "error"))
@@ -1033,7 +1719,7 @@ def handle_help(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
     return apply_mute_state(device_id, base_response(
         True,
         text,
-        "Commands: test, status, list devices, ping, mute, broadcast, timer.",
+        "Commands: test, status, list devices, ping, mute, broadcast, timer, notify timer, run action.",
         "success",
         command="help",
     ))
@@ -1192,10 +1878,12 @@ def handle_repeat(text: str, device_id: str, remainder: str) -> dict[str, Any]:
 
 def handle_timer(text: str, device_id: str, remainder: str) -> dict[str, Any]:
     duration_text = remainder.strip()
+    _seconds, mode = parse_timer_request(duration_text or text)
     if not duration_text:
         PENDING_ACTIONS[device_id] = {
             "command": "timer",
             "slot": "duration",
+            "mode": mode,
             "prompt": "How long should the timer be?",
             "created_at": time.time(),
         }
@@ -1205,9 +1893,87 @@ def handle_timer(text: str, device_id: str, remainder: str) -> dict[str, Any]:
             "How long should the timer be?",
             "success",
             command="timer",
-            state={"awaiting": "duration"},
+            state={"awaiting": "duration", "mode": mode},
         ))
-    return timer_response(text, device_id, duration_text)
+    return timer_response(text, device_id, duration_text, mode)
+
+
+def script_action_response(text: str, device_id: str, action_name: str) -> dict[str, Any]:
+    try:
+        result = run_script_action(action_name, device_id, text)
+    except subprocess.TimeoutExpired:
+        return apply_mute_state(device_id, base_response(
+            False,
+            text,
+            "Action timed out.",
+            "error",
+            command="script_action",
+            state={"action": action_name},
+        ))
+    except Exception as exc:
+        return apply_mute_state(device_id, base_response(
+            False,
+            text,
+            "Action failed.",
+            "error",
+            command="script_action",
+            state={"action": action_name, "error": str(exc)},
+        ))
+
+    display_output = result["stdout"] or result["stderr"] or ("Action complete." if result["ok"] else "Action failed.")
+    first_line = display_output.splitlines()[0] if display_output else ""
+    display_text = first_line[:160] or ("Action complete." if result["ok"] else "Action failed.")
+    return apply_mute_state(device_id, base_response(
+        bool(result["ok"]),
+        text,
+        display_text,
+        "success" if result["ok"] else "error",
+        command="script_action",
+        state={"action": action_name, "result": result},
+    ))
+
+
+def handle_script_action(text: str, device_id: str, remainder: str) -> dict[str, Any]:
+    if not SCRIPT_ACTIONS:
+        return apply_mute_state(device_id, base_response(
+            False,
+            text,
+            "No server actions configured.",
+            "error",
+            command="script_action",
+        ))
+
+    action_name = resolve_script_action(remainder)
+    if not action_name:
+        available = ", ".join(action["name"] for action in list_script_actions()[:4])
+        return apply_mute_state(device_id, base_response(
+            False,
+            text,
+            f"Available actions: {available}" if available else "No server actions configured.",
+            "error",
+            command="script_action",
+            state={"available_actions": list_script_actions()},
+        ))
+
+    action = SCRIPT_ACTIONS[action_name]
+    if action.get("requires_confirmation"):
+        PENDING_ACTIONS[device_id] = {
+            "command": "script_action",
+            "slot": "confirmation",
+            "action_name": action_name,
+            "prompt": f"Confirm action: {action_name}?",
+            "created_at": time.time(),
+        }
+        return apply_mute_state(device_id, base_response(
+            True,
+            text,
+            f"Confirm action: {action_name}?",
+            "success",
+            command="script_action",
+            state={"awaiting": "confirmation", "action": action_name},
+        ))
+
+    return script_action_response(text, device_id, action_name)
 
 
 def handle_alert(text: str, device_id: str, remainder: str) -> dict[str, Any]:
@@ -1387,6 +2153,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("cancel", ("cancel", "stop", "nevermind", "never mind"), "Cancel a pending command.", handle_cancel),
     Command("repeat", ("repeat", "say"), "Display the spoken suffix.", handle_repeat),
     Command("timer", ("timer", "set timer", "set a timer", "start timer", "start a timer"), "Set a timer.", handle_timer),
+    Command("script_action", ("run action", "action", "execute action", "run script"), "Run an allowlisted server script.", handle_script_action),
     Command("alert", ("alert", "show alert", "show an alert", "send alert", "send an alert", "broadcast alert"), "Show an alert on one or more devices.", handle_alert),
     Command("broadcast", ("broadcast",), "Broadcast text to all known devices.", handle_broadcast),
     Command("camera_view", ("show camera", "show the camera", "show security cam", "show the security cam", "show security camera", "show the security camera", "display camera", "display the camera", "display security cam", "display the security cam", "display security camera", "display the security camera"), "Show a camera frame on a display.", handle_camera_view),
@@ -1573,6 +2340,13 @@ DASHBOARD_HTML = """<!doctype html>
       font-size: 12px;
       white-space: nowrap;
     }
+    .firmware {
+      display: grid;
+      gap: 3px;
+    }
+    .firmware-version {
+      font-weight: 650;
+    }
     .links {
       display: flex;
       gap: 8px;
@@ -1591,6 +2365,35 @@ DASHBOARD_HTML = """<!doctype html>
     .name-form button {
       flex: 0 0 auto;
     }
+    .action-form {
+      display: grid;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .action-form input {
+      width: 100%;
+    }
+    .action-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .diagnostics {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+    }
+    .diagnostic {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .diagnostic.ok .device-id { color: var(--good); }
+    .diagnostic:not(.ok) .device-id { color: var(--warn); }
     a {
       color: var(--accent);
       text-decoration: none;
@@ -1684,6 +2487,21 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
       <div>
         <div class="panel">
+          <h2>Startup</h2>
+          <div class="diagnostics" id="diagnostics"></div>
+        </div>
+        <div style="height:18px"></div>
+        <div class="panel">
+          <h2>Actions</h2>
+          <div class="events" id="actions"></div>
+        </div>
+        <div style="height:18px"></div>
+        <div class="panel">
+          <h2>Timers</h2>
+          <div class="events" id="timers"></div>
+        </div>
+        <div style="height:18px"></div>
+        <div class="panel">
           <h2>Recent Commands</h2>
           <div class="events" id="commands"></div>
         </div>
@@ -1691,6 +2509,11 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="panel">
           <h2>Button Events</h2>
           <div class="events" id="buttonEvents"></div>
+        </div>
+        <div style="height:18px"></div>
+        <div class="panel">
+          <h2>Firmware Catalog</h2>
+          <div class="events" id="firmwareCatalog"></div>
         </div>
       </div>
     </section>
@@ -1750,8 +2573,10 @@ DASHBOARD_HTML = """<!doctype html>
         ["Online", data.summary.online_count],
         ["Offline", data.summary.offline_count],
         ["Pending Events", data.summary.pending_event_count],
+        ["Timers", data.summary.active_timer_count],
         ["Commands", data.summary.recent_command_count],
         ["Buttons", data.summary.recent_button_event_count],
+        ["Firmware", (data.firmware_catalog || []).length],
       ];
       for (const [label, value] of items) {
         const card = el("div", "stat");
@@ -1793,6 +2618,27 @@ DASHBOARD_HTML = """<!doctype html>
         return wrap;
       }
       for (const item of items) wrap.append(el("span", "chip", item));
+      return wrap;
+    }
+
+    function firmwareDetails(device) {
+      const firmware = device.firmware || {};
+      const project = device.firmware_project || firmware.project || "";
+      const version = device.firmware_version || firmware.version || "";
+      const target = firmware.target || device.status?.target || "";
+      const deviceType = device.device_type || firmware.device_type || "";
+      const hasFirmware = Boolean(project || version || target || deviceType);
+      const wrap = el("div", "firmware");
+
+      if (!hasFirmware) {
+        wrap.append(el("span", "meta", "Not reported"));
+        return wrap;
+      }
+
+      wrap.append(el("div", "firmware-version", version || "Unknown version"));
+      if (project) wrap.append(el("div", "meta", project));
+      if (target) wrap.append(el("div", "meta", `target: ${target}`));
+      if (deviceType) wrap.append(el("div", "meta", `type: ${deviceType}`));
       return wrap;
     }
 
@@ -1878,7 +2724,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       const table = el("table");
       const thead = document.createElement("thead");
-      thead.innerHTML = "<tr><th>Device</th><th>Status</th><th>Type</th><th>Capabilities</th><th>Endpoints</th><th>Last Result</th><th>Actions</th></tr>";
+      thead.innerHTML = "<tr><th>Device</th><th>Status</th><th>Type</th><th>Firmware</th><th>Capabilities</th><th>Endpoints</th><th>Last Result</th><th>Actions</th></tr>";
       const tbody = document.createElement("tbody");
       for (const device of devices) {
         const tr = document.createElement("tr");
@@ -1903,6 +2749,10 @@ DASHBOARD_HTML = """<!doctype html>
         tdType.textContent = text(device.type);
         tdType.append(el("div", "meta", text(device.model)));
 
+        const tdFirmware = document.createElement("td");
+        tdFirmware.dataset.label = "Firmware";
+        tdFirmware.append(firmwareDetails(device));
+
         const tdCaps = document.createElement("td");
         tdCaps.dataset.label = "Capabilities";
         tdCaps.append(chips(device.capabilities));
@@ -1923,7 +2773,7 @@ DASHBOARD_HTML = """<!doctype html>
         removeButton.addEventListener("click", () => openRemoveModal(device));
         tdActions.append(removeButton);
 
-        tr.append(tdDevice, tdStatus, tdType, tdCaps, tdEndpoints, tdLast, tdActions);
+        tr.append(tdDevice, tdStatus, tdType, tdFirmware, tdCaps, tdEndpoints, tdLast, tdActions);
         tbody.append(tr);
       }
       table.append(thead, tbody);
@@ -1944,6 +2794,122 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function renderFirmwareCatalog(items) {
+      const root = document.getElementById("firmwareCatalog");
+      root.replaceChildren();
+      if (!items || !items.length) {
+        root.append(el("div", "empty", "No firmware catalog entries."));
+        return;
+      }
+      for (const item of items) {
+        const entry = el("div", "event");
+        entry.append(el("div", "device-id", text(item.device_type)));
+        entry.append(el("div", "meta", `latest ${text(item.latest_version)} | ${item.version_count || 0} version(s)`));
+        if (item.latest && item.latest.url) {
+          const link = el("a", "", text(item.latest.filename || "binary"));
+          link.href = item.latest.url;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          entry.append(link);
+        }
+        root.append(entry);
+      }
+    }
+
+    function defaultActionTranscript(action) {
+      if (action.name === "notify phone") return "run action notify phone message dashboard test";
+      if (action.name === "send test email") return "run action send test email";
+      if (action.name === "send email") return "run action send email to recipient@example.com subject test message dashboard test";
+      return `run action ${action.name}`;
+    }
+
+    async function runAction(action, input, button, result) {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Running";
+      result.textContent = "";
+      try {
+        const payload = {
+          transcript: input.value || defaultActionTranscript(action),
+          device_id: "dashboard",
+        };
+        if (action.requires_confirmation) {
+          if (!window.confirm(`Run action "${action.name}"?`)) {
+            button.textContent = original;
+            button.disabled = false;
+            return;
+          }
+          payload.confirm = true;
+        }
+        const response = await fetch(`/actions/${encodeURIComponent(action.name)}/run`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        result.textContent = body.display_text || body.error || `HTTP ${response.status}`;
+      } catch (error) {
+        result.textContent = error.message;
+      }
+      button.textContent = original;
+      button.disabled = false;
+    }
+
+    function renderActions(actions) {
+      const root = document.getElementById("actions");
+      root.replaceChildren();
+      if (!actions || !actions.length) {
+        root.append(el("div", "empty", "No packaged actions configured."));
+        return;
+      }
+      for (const action of actions) {
+        const item = el("div", "event");
+        item.append(el("div", "device-id", action.name));
+        item.append(el("div", "meta", `${action.requires_confirmation ? "confirmation required" : "no confirmation"} | timeout ${action.timeout_seconds}s`));
+        if (action.description) item.append(el("div", "", action.description));
+        const form = el("div", "action-form");
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = defaultActionTranscript(action);
+        const row = el("div", "action-row");
+        const button = el("button", "", "Run");
+        button.type = "button";
+        const result = el("span", "meta", "");
+        button.addEventListener("click", () => runAction(action, input, button, result));
+        row.append(button, result);
+        form.append(input, row);
+        item.append(form);
+        root.append(item);
+      }
+    }
+
+    function renderDiagnostics(items) {
+      const root = document.getElementById("diagnostics");
+      root.replaceChildren();
+      for (const item of items || []) {
+        const row = el("div", `diagnostic ${item.ok ? "ok" : ""}`);
+        row.append(el("div", "device-id", item.name));
+        row.append(el("div", "meta", item.detail));
+        root.append(row);
+      }
+    }
+
+    function renderTimers(timers) {
+      const root = document.getElementById("timers");
+      root.replaceChildren();
+      if (!timers || !timers.length) {
+        root.append(el("div", "empty", "No active timers."));
+        return;
+      }
+      for (const timer of timers) {
+        const item = el("div", "event");
+        item.append(el("div", "device-id", `${text(timer.device_name)} -> ${text(timer.mode)}`));
+        item.append(el("div", "", `${text(timer.remaining_seconds)}s remaining of ${text(timer.duration_seconds)}s`));
+        item.append(el("div", "meta", `expires ${new Date(timer.expires_at * 1000).toLocaleTimeString()}`));
+        root.append(item);
+      }
+    }
+
     function stateDetails(state) {
       const details = [];
       if (!state || typeof state !== "object") return details;
@@ -1958,7 +2924,11 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("serverMeta").textContent =
         `Listening on ${data.server.host}:${data.server.port} | uptime ${uptime(data.server.uptime_seconds)} | stale after ${data.server.device_stale_seconds}s`;
       renderStats(data);
+      renderDiagnostics(data.server.diagnostics);
+      renderActions(data.actions);
+      renderTimers(data.active_timers);
       renderDevices(data.devices);
+      renderFirmwareCatalog(data.firmware_catalog);
       renderEvents("commands", data.recent_commands, "No commands recorded.", (item, command) => {
         item.append(el("div", "device-id", text(command.command)));
         item.append(el("div", "meta", `${text(command.device_id)} | ${text(command.duration_ms)} ms | tone ${text(command.tone)} | ${command.ok ? "ok" : "failed"}`));
@@ -1980,7 +2950,7 @@ DASHBOARD_HTML = """<!doctype html>
         document.getElementById("refreshState").textContent = "Refresh paused for confirmation";
         return;
       }
-      if (document.activeElement && document.activeElement.closest(".name-form")) {
+      if (document.activeElement && document.activeElement.closest(".name-form, .action-form")) {
         document.getElementById("refreshState").textContent = "Refresh paused while editing";
         return;
       }
@@ -2389,6 +3359,42 @@ class CommandHandler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             json_response(self, 200, {"ok": True, "service": "spoken-command-server"})
             return
+        if parsed.path == "/actions":
+            with STATE_LOCK:
+                payload = {"actions": list_script_actions()}
+            json_response(self, 200, payload)
+            return
+        if parsed.path == "/firmware/catalog":
+            with STATE_LOCK:
+                payload = {"firmware": firmware_catalog_summary()}
+            json_response(self, 200, payload)
+            return
+        if parsed.path.startswith("/firmware/catalog/"):
+            device_type = clean_device_type(parsed.path.removeprefix("/firmware/catalog/"))
+            with STATE_LOCK:
+                entry = FIRMWARE_CATALOG.get(device_type)
+            if not entry:
+                json_response(self, 404, {"error": "firmware catalog entry not found", "device_type": device_type})
+                return
+            json_response(self, 200, {"device_type": device_type, "firmware": entry})
+            return
+        if parsed.path.startswith("/firmware/bin/"):
+            parts = parsed.path.strip("/").split("/", 4)
+            if len(parts) != 5:
+                json_response(self, 404, {"error": "expected /firmware/bin/{device_type}/{version}/{filename}"})
+                return
+            _firmware, _bin, device_type, version, filename = parts
+            path = firmware_binary_path(device_type, version, filename)
+            if not os.path.isfile(path):
+                json_response(self, 404, {"error": "firmware binary not found"})
+                return
+            with open(path, "rb") as handle:
+                body = handle.read()
+            binary_response(self, 200, "application/octet-stream", body, {
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="{clean_filename(filename)}"',
+            })
+            return
         if parsed.path.startswith("/media/"):
             parts = parsed.path.strip("/").split("/")
             if len(parts) != 3:
@@ -2452,6 +3458,52 @@ class CommandHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/actions/") and parsed.path.endswith("/run"):
+            raw_name = unquote(parsed.path.removeprefix("/actions/").removesuffix("/run")).strip("/")
+            try:
+                payload = read_optional_json_body(self)
+                device_id = clean_device_id(str(payload.get("device_id", "api")))
+                transcript = str(payload.get("transcript", f"run action {raw_name}"))[:500]
+                action_name = resolve_script_action(raw_name)
+                if not action_name:
+                    json_response(self, 404, {"ok": False, "error": "action not found", "actions": list_script_actions()})
+                    return
+                action = SCRIPT_ACTIONS[action_name]
+                if action.get("requires_confirmation") and payload.get("confirm") is not True:
+                    json_response(self, 409, {
+                        "ok": False,
+                        "error": "action requires confirmation",
+                        "action": action_public_metadata(action_name, action),
+                    })
+                    return
+                response = script_action_response(transcript, device_id, action_name)
+                json_response(self, 200 if response.get("ok") else 500, response)
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/firmware/catalog":
+            try:
+                body = read_request_body(self)
+                payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("firmware catalog body must be a JSON object")
+                device_type = clean_device_type(str(payload.get("device_type", "")))
+                version = clean_version(str(payload.get("version", "")))
+                metadata = {
+                    "filename": clean_filename(str(payload.get("filename", "firmware.bin"))),
+                    "size": payload.get("size"),
+                    "sha256": str(payload.get("sha256", ""))[:128],
+                    "url": str(payload.get("url", ""))[:240],
+                    "notes": str(payload.get("notes", ""))[:500],
+                }
+                with STATE_LOCK:
+                    record = add_firmware_catalog_entry(device_type, version, metadata)
+                json_response(self, 200, {"ok": True, "firmware": record})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
         if parsed.path == "/devices/events":
             try:
                 body = read_request_body(self)
@@ -2562,7 +3614,8 @@ class CommandHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 update_device_result(device_id, device_response)
                 RECENT_COMMANDS.append(record)
-                del RECENT_COMMANDS[:-100]
+                del RECENT_COMMANDS[:-RECENT_HISTORY_LIMIT]
+                save_command_record(record)
             json_response(self, 200, device_response)
         except Exception as exc:
             json_response(self, 400, {
@@ -2573,8 +3626,54 @@ class CommandHandler(BaseHTTPRequestHandler):
                 "error": str(exc),
             })
 
+    def do_PUT(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/firmware/bin/"):
+            parts = parsed.path.strip("/").split("/", 4)
+            if len(parts) != 5:
+                json_response(self, 404, {"error": "expected /firmware/bin/{device_type}/{version}/{filename}"})
+                return
+            _firmware, _bin, device_type, version, filename = parts
+            try:
+                body = read_request_body(self, MAX_FIRMWARE_BYTES)
+                cleaned_type = clean_device_type(device_type)
+                cleaned_version = clean_version(version)
+                cleaned_filename = clean_filename(filename)
+                path = firmware_binary_path(cleaned_type, cleaned_version, cleaned_filename)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as handle:
+                    handle.write(body)
+                sha256 = hashlib.sha256(body).hexdigest()
+                url = f"/firmware/bin/{cleaned_type}/{cleaned_version}/{cleaned_filename}"
+                metadata = {
+                    "filename": cleaned_filename,
+                    "size": len(body),
+                    "sha256": sha256,
+                    "url": url,
+                    "content_type": self.headers.get("Content-Type", "application/octet-stream"),
+                    "notes": self.headers.get("X-Firmware-Notes", ""),
+                }
+                with STATE_LOCK:
+                    record = add_firmware_catalog_entry(cleaned_type, cleaned_version, metadata)
+                json_response(self, 200, {"ok": True, "firmware": record})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+        json_response(self, 404, {"error": "not found"})
+
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/firmware/catalog/"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) not in (3, 4):
+                json_response(self, 404, {"error": "expected /firmware/catalog/{device_type} or /firmware/catalog/{device_type}/{version}"})
+                return
+            _firmware, _catalog, device_type = parts[:3]
+            version = parts[3] if len(parts) == 4 else None
+            with STATE_LOCK:
+                removed = remove_firmware_catalog_entry(device_type, version)
+            json_response(self, 200, {"ok": True, "device_type": clean_device_type(device_type), "version": version, "removed": removed})
+            return
         if parsed.path.startswith("/devices/"):
             device_id = clean_device_id(parsed.path.removeprefix("/devices/"))
             with STATE_LOCK:
@@ -2589,8 +3688,13 @@ class CommandHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    init_database()
+    load_recent_history()
+    load_firmware_catalog()
+    load_script_actions()
     load_device_friendly_names()
     load_device_registry()
+    threading.Thread(target=timer_worker, name="timer-worker", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), CommandHandler)
     print(f"Listening on http://{HOST}:{PORT}")
     print("POST audio to /audio/command with ELEVENLABS_API_KEY set in the environment.")
