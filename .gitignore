@@ -5,6 +5,7 @@
 server/.env.local
 server/device-names.json
 server/device-registry.json
+server/rules.json
 server/server.pid
 server/server.log
 server/server-state.sqlite3

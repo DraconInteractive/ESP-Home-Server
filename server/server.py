@@ -36,6 +36,7 @@ MAX_AUDIO_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_AUDIO_BYTES", str(4 * 1
 MAX_FIRMWARE_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_FIRMWARE_BYTES", str(8 * 1024 * 1024)))
 DEVICE_STALE_SECONDS = int(os.environ.get("COMMAND_SERVER_DEVICE_STALE_SECONDS", "45"))
 DEVICE_PING_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_DEVICE_PING_TIMEOUT_SECONDS", "2.0"))
+LOW_BATTERY_THRESHOLD_PERCENT = float(os.environ.get("COMMAND_SERVER_LOW_BATTERY_THRESHOLD_PERCENT", "20"))
 MEDIA_SNAPSHOT_TTL_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_SNAPSHOT_TTL_SECONDS", "1.0"))
 MEDIA_STREAM_IDLE_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_STREAM_IDLE_SECONDS", "3.0"))
 MEDIA_STREAM_CHUNK_SIZE = int(os.environ.get("COMMAND_SERVER_MEDIA_STREAM_CHUNK_SIZE", "4096"))
@@ -46,6 +47,10 @@ DEVICE_NAMES_PATH = os.environ.get(
 DEVICE_REGISTRY_PATH = os.environ.get(
     "COMMAND_SERVER_DEVICE_REGISTRY_PATH",
     os.path.join(os.path.dirname(__file__), "device-registry.json"),
+)
+RULES_PATH = os.environ.get(
+    "COMMAND_SERVER_RULES_PATH",
+    os.path.join(os.path.dirname(__file__), "rules.json"),
 )
 DATABASE_PATH = os.environ.get(
     "COMMAND_SERVER_DATABASE_PATH",
@@ -73,13 +78,16 @@ SERVER_STARTED_AT = int(time.time())
 
 RECENT_COMMANDS: list[dict[str, Any]] = []
 RECENT_BUTTON_EVENTS: list[dict[str, Any]] = []
+RECENT_RULE_RUNS: list[dict[str, Any]] = []
 ACTIVE_TIMERS: dict[str, dict[str, Any]] = {}
+LOW_BATTERY_NOTIFIED: set[str] = set()
 MUTED_DEVICES: dict[str, bool] = {}
 GLOBAL_MUTED = False
 PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
 DEVICES: dict[str, dict[str, Any]] = {}
 DEVICE_EVENTS: dict[str, list[dict[str, Any]]] = {}
 DEVICE_FRIENDLY_NAMES: dict[str, str] = {}
+EVENT_RULES: dict[str, dict[str, Any]] = {}
 FIRMWARE_CATALOG: dict[str, dict[str, Any]] = {}
 SCRIPT_ACTIONS: dict[str, dict[str, Any]] = {}
 SCRIPT_ACTION_ALIASES: dict[str, str] = {}
@@ -808,6 +816,27 @@ def save_command_record(record: dict[str, Any]) -> None:
         )
 
 
+def record_command_result(record: dict[str, Any]) -> None:
+    update_device_result(clean_device_id(str(record.get("device_id", "unknown"))), {
+        "command": record.get("command"),
+        "transcript": record.get("text", ""),
+        "display_text": record.get("display_text", ""),
+    })
+    RECENT_COMMANDS.append(record)
+    del RECENT_COMMANDS[:-RECENT_HISTORY_LIMIT]
+    save_command_record(record)
+    transcript = record.get("transcript", {})
+    source = transcript.get("source") if isinstance(transcript, dict) else ""
+    if source != "rule":
+        dispatch_server_event(
+            "command",
+            clean_device_id(str(record.get("device_id", "unknown"))),
+            command=str(record.get("command") or ""),
+            transcript=str(record.get("text") or ""),
+            ok=bool(record.get("ok")),
+        )
+
+
 def save_button_event_record(event: dict[str, Any]) -> None:
     with db_connect() as connection:
         connection.execute(
@@ -956,6 +985,227 @@ def save_device_registry() -> None:
     os.replace(temp_path, DEVICE_REGISTRY_PATH)
 
 
+def clean_rule_id(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", str(value).strip())
+    return cleaned[:80] or uuid.uuid4().hex
+
+
+def clean_rule_type(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", str(value).strip().lower())
+    return cleaned[:40] or "button"
+
+
+def clean_rule_step(raw_step: dict[str, Any]) -> dict[str, Any]:
+    action_type = str(raw_step.get("action_type", raw_step.get("type", "transcript")))[:40]
+    return {
+        "action_type": action_type,
+        "transcript": str(raw_step.get("transcript", ""))[:500],
+        "action_name": str(raw_step.get("action_name", ""))[:80],
+        "action_transcript": str(raw_step.get("action_transcript", ""))[:500],
+    }
+
+
+def rule_steps(rule: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_steps = rule.get("steps")
+    if isinstance(raw_steps, list) and raw_steps:
+        return [
+            clean_rule_step(step)
+            for step in raw_steps
+            if isinstance(step, dict)
+        ][:8]
+    return [clean_rule_step(rule)]
+
+
+def public_rule(rule_id: str, rule: dict[str, Any]) -> dict[str, Any]:
+    steps = rule_steps(rule)
+    return {
+        "id": rule_id,
+        "enabled": bool(rule.get("enabled", True)),
+        "name": str(rule.get("name", rule_id))[:80],
+        "event_type": clean_rule_type(str(rule.get("event_type", "button"))),
+        "device_id": str(rule.get("device_id", ""))[:80],
+        "button": str(rule.get("button", ""))[:40],
+        "capability": str(rule.get("capability", ""))[:40],
+        "command": str(rule.get("command", ""))[:80],
+        "steps": steps,
+        "action_type": steps[0].get("action_type", "transcript") if steps else "transcript",
+        "transcript": steps[0].get("transcript", "") if steps else "",
+        "action_name": steps[0].get("action_name", "") if steps else "",
+        "action_transcript": steps[0].get("action_transcript", "") if steps else "",
+        "created_at": rule.get("created_at"),
+        "last_run_at": rule.get("last_run_at"),
+        "last_result": rule.get("last_result", ""),
+    }
+
+
+def load_event_rules() -> None:
+    try:
+        with open(RULES_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load event rules: {exc}")
+        return
+
+    entries = payload.get("rules") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return
+    for raw_rule in entries:
+        if not isinstance(raw_rule, dict):
+            continue
+        rule_id = clean_rule_id(str(raw_rule.get("id", "")))
+        EVENT_RULES[rule_id] = public_rule(rule_id, raw_rule)
+
+
+def save_event_rules() -> None:
+    directory = os.path.dirname(RULES_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = {"rules": [public_rule(rule_id, EVENT_RULES[rule_id]) for rule_id in sorted(EVENT_RULES)]}
+    temp_path = f"{RULES_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, RULES_PATH)
+
+
+def upsert_event_rule(payload: dict[str, Any]) -> dict[str, Any]:
+    rule_id = clean_rule_id(str(payload.get("id", "")) or uuid.uuid4().hex)
+    rule = public_rule(rule_id, payload)
+    rule["created_at"] = int(rule.get("created_at") or time.time())
+    EVENT_RULES[rule_id] = rule
+    save_event_rules()
+    return public_rule(rule_id, rule)
+
+
+def rule_matches_event(rule: dict[str, Any], event: dict[str, Any]) -> bool:
+    if not rule.get("enabled", True):
+        return False
+    if clean_rule_type(str(rule.get("event_type", "button"))) != clean_rule_type(str(event.get("event_type", "button"))):
+        return False
+    rule_device = str(rule.get("device_id", "")).strip()
+    if rule_device and clean_device_id(rule_device) != clean_device_id(str(event.get("device_id", ""))):
+        return False
+    rule_button = str(rule.get("button", "")).strip()
+    if rule_button and rule_button != str(event.get("button", "")).strip():
+        return False
+    rule_capability = str(rule.get("capability", "")).strip()
+    if rule_capability and rule_capability != str(event.get("capability", "")).strip():
+        return False
+    rule_command = normalize_command_text(str(rule.get("command", "")))
+    if rule_command and rule_command != normalize_command_text(str(event.get("command", ""))):
+        return False
+    return True
+
+
+def record_rule_run(rule_id: str, event: dict[str, Any], ok: bool, result: str) -> None:
+    now = int(time.time())
+    if rule_id in EVENT_RULES:
+        EVENT_RULES[rule_id]["last_run_at"] = now
+        EVENT_RULES[rule_id]["last_result"] = result[:200]
+        save_event_rules()
+    RECENT_RULE_RUNS.append({
+        "rule_id": rule_id,
+        "received_at": now,
+        "device_id": event.get("device_id"),
+        "event_type": event.get("event_type"),
+        "ok": ok,
+        "result": result[:500],
+    })
+    del RECENT_RULE_RUNS[:-RECENT_HISTORY_LIMIT]
+
+
+def run_rule_step(rule_id: str, step: dict[str, Any], event: dict[str, Any]) -> tuple[bool, str]:
+    action_type = str(step.get("action_type", "transcript"))
+    if action_type == "action":
+        action_name = resolve_script_action(str(step.get("action_name", ""))) or ""
+        if not action_name:
+            raise ValueError("action_name did not match a configured action")
+        transcript = str(step.get("action_transcript") or f"run action {action_name}")
+        result = run_script_action(action_name, str(event.get("device_id", "rule")), transcript)
+        return bool(result.get("ok")), str(result.get("stdout") or result.get("stderr") or "")
+
+    transcript = str(step.get("transcript", "")).strip()
+    if not transcript:
+        raise ValueError("transcript action is empty")
+    response = command_response(transcript, str(event.get("device_id", "rule")))
+    record = {
+        "device_id": clean_device_id(str(event.get("device_id", "rule"))),
+        "received_at": int(time.time()),
+        "duration_ms": 0,
+        "ok": bool(response.get("ok")),
+        "text": transcript,
+        "display_text": response["display_text"],
+        "tone": response["tone"],
+        "command": response.get("command"),
+        "state": response.get("state", {}),
+        "muted": MUTED_DEVICES.get(str(event.get("device_id", "rule")), False),
+        "transcript": {"text": transcript, "source": "rule", "rule_id": rule_id},
+    }
+    record_command_result(record)
+    return bool(response.get("ok")), str(response.get("display_text", ""))
+
+
+def run_event_rule(rule_id: str, rule: dict[str, Any], event: dict[str, Any]) -> None:
+    try:
+        results = []
+        ok = True
+        for step in rule_steps(rule):
+            step_ok, result = run_rule_step(rule_id, step, event)
+            ok = ok and step_ok
+            results.append(result)
+        record_rule_run(rule_id, event, ok, " | ".join(item for item in results if item))
+    except Exception as exc:
+        record_rule_run(rule_id, event, False, str(exc))
+        print(f"Rule {rule_id} failed: {exc}")
+
+
+def run_matching_event_rules(event: dict[str, Any]) -> None:
+    for rule_id, rule in list(EVENT_RULES.items()):
+        if rule_matches_event(rule, event):
+            run_event_rule(rule_id, dict(rule), dict(event))
+
+
+def dispatch_server_event(event_type: str, device_id: str = "", **extra: Any) -> None:
+    event = {
+        "event_type": clean_rule_type(event_type),
+        "device_id": clean_device_id(device_id) if device_id else "",
+        "received_at": int(time.time()),
+    }
+    for key, value in extra.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            event[key] = value
+    run_matching_event_rules(event)
+
+
+def test_event_for_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    event_type = clean_rule_type(str(rule.get("event_type", "button")))
+    event = {
+        "event_type": event_type,
+        "device_id": clean_device_id(str(rule.get("device_id", "rule-test"))),
+        "received_at": int(time.time()),
+    }
+    if rule.get("button"):
+        event["button"] = str(rule.get("button"))
+    if rule.get("capability"):
+        event["capability"] = str(rule.get("capability"))
+    if rule.get("command"):
+        event["command"] = str(rule.get("command"))
+    if event_type == "low_battery":
+        event.setdefault("battery_percent", 10)
+    return event
+
+
+def run_rule_test(rule_id: str) -> dict[str, Any]:
+    rule = EVENT_RULES.get(rule_id)
+    if not rule:
+        raise ValueError("rule not found")
+    event = test_event_for_rule(rule)
+    run_event_rule(rule_id, dict(rule), event)
+    return RECENT_RULE_RUNS[-1] if RECENT_RULE_RUNS else {}
+
+
 def default_device_metadata(device_id: str) -> dict[str, Any]:
     if device_id.startswith("waveshare-c6-"):
         return {
@@ -1015,6 +1265,7 @@ def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None) 
         "first_seen": now,
         "request_count": 0,
     })
+    was_session_seen = bool(device.get("session_seen", False))
     for key, value in default_device_metadata(device_id).items():
         device.setdefault(key, value)
     if DEVICE_FRIENDLY_NAMES.get(device_id):
@@ -1026,6 +1277,8 @@ def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None) 
         device["remote_addr"] = handler.client_address[0]
         device["user_agent"] = handler.headers.get("User-Agent", "")
     save_device_registry()
+    if not was_session_seen:
+        dispatch_server_event("device_online", device_id, device_type=str(device.get("type", "unknown")))
 
 
 def register_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None) -> dict[str, Any]:
@@ -1068,9 +1321,30 @@ def register_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRe
             for key, value in payload["status"].items()
             if isinstance(value, (str, int, float, bool)) or value is None
         }
+        maybe_dispatch_low_battery(device_id, device["status"])
 
     save_device_registry()
     return public_device(device_id)
+
+
+def maybe_dispatch_low_battery(device_id: str, status: dict[str, Any]) -> None:
+    raw_value = None
+    for key in ("battery_percent", "battery_pct", "battery_level", "battery"):
+        if isinstance(status.get(key), (int, float)):
+            raw_value = float(status[key])
+            break
+    if raw_value is None:
+        return
+    if raw_value > 1:
+        percent = raw_value
+    else:
+        percent = raw_value * 100
+    if percent <= LOW_BATTERY_THRESHOLD_PERCENT:
+        if device_id not in LOW_BATTERY_NOTIFIED:
+            LOW_BATTERY_NOTIFIED.add(device_id)
+            dispatch_server_event("low_battery", device_id, battery_percent=round(percent, 1))
+    elif percent > LOW_BATTERY_THRESHOLD_PERCENT + 5:
+        LOW_BATTERY_NOTIFIED.discard(device_id)
 
 
 def update_device_result(device_id: str, response: dict[str, Any]) -> None:
@@ -1231,6 +1505,7 @@ def dashboard_snapshot() -> dict[str, Any]:
             "offline_count": len(devices) - online_count,
             "pending_event_count": sum(int(device.get("pending_events", 0)) for device in devices),
             "active_timer_count": len(ACTIVE_TIMERS),
+            "rule_count": len(EVENT_RULES),
             "recent_command_count": len(RECENT_COMMANDS),
             "recent_button_event_count": len(RECENT_BUTTON_EVENTS),
             "device_types": device_types,
@@ -1238,6 +1513,8 @@ def dashboard_snapshot() -> dict[str, Any]:
         },
         "firmware_catalog": firmware_catalog_summary(),
         "actions": list_script_actions(),
+        "rules": [public_rule(rule_id, EVENT_RULES[rule_id]) for rule_id in sorted(EVENT_RULES)],
+        "recent_rule_runs": RECENT_RULE_RUNS[-20:],
         "active_timers": active_timer_summary(),
         "devices": devices,
         "recent_commands": RECENT_COMMANDS[-20:],
@@ -1388,6 +1665,7 @@ def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHT
     touch_device(device_id, handler)
     event = {
         "device_id": device_id,
+        "event_type": "button",
         "received_at": int(time.time()),
         "event": str(payload.get("event", "click"))[:32],
         "button": str(payload.get("button", "button"))[:32],
@@ -1415,6 +1693,7 @@ def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHT
         f"device={device_id} button={event['button']} event={event['event']} "
         f"count={event['click_count']} gpio={event['gpio']} remote={event['remote_addr']}"
     )
+    run_matching_event_rules(event)
     return event
 
 
@@ -1592,6 +1871,7 @@ def fire_timer(timer: dict[str, Any]) -> None:
     mode = str(timer.get("mode", "device"))
     duration = format_duration(int(timer.get("duration_seconds", 0)))
     message = f"Timer done: {duration}"
+    dispatch_server_event("timer_complete", device_id, timer_id=str(timer.get("id", "")), mode=mode, duration_seconds=timer.get("duration_seconds"))
 
     if mode == "phone":
         try:
@@ -1830,6 +2110,8 @@ def handle_ping(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
         for candidate_id in sorted(DEVICES)
     ]
     offline = [result for result in results if not result["online"]]
+    for result in offline:
+        dispatch_server_event("device_offline", str(result.get("id", "")), detail=str(result.get("detail", "")))
 
     online_count = len(results) - len(offline)
     if results:
@@ -2217,9 +2499,9 @@ DASHBOARD_HTML = """<!doctype html>
       font-weight: 650;
     }
     main {
-      max-width: 1280px;
+      width: min(1880px, 100%);
       margin: 0 auto;
-      padding: 20px;
+      padding: 20px clamp(16px, 2.4vw, 36px);
     }
     .toolbar {
       display: flex;
@@ -2228,13 +2510,20 @@ DASHBOARD_HTML = """<!doctype html>
       color: var(--muted);
       flex-wrap: wrap;
     }
-    button, input {
+    button, input, select, textarea {
       border: 1px solid var(--line);
       background: var(--panel);
       color: var(--text);
-      height: 34px;
       padding: 0 12px;
       border-radius: 6px;
+    }
+    button, input, select {
+      height: 34px;
+    }
+    textarea {
+      min-height: 76px;
+      padding: 8px 10px;
+      resize: vertical;
     }
     button {
       cursor: pointer;
@@ -2243,7 +2532,7 @@ DASHBOARD_HTML = """<!doctype html>
       border-color: var(--bad);
       color: var(--bad);
     }
-    input {
+    input, select, textarea {
       min-width: 0;
     }
     button:hover { border-color: var(--accent); }
@@ -2275,9 +2564,15 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .grid {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
-      gap: 18px;
+      grid-template-columns: minmax(900px, 1fr) minmax(360px, 440px);
+      gap: 22px;
       align-items: start;
+    }
+    .grid > .panel {
+      min-width: 0;
+    }
+    .grid > div {
+      min-width: 0;
     }
     .panel {
       overflow: hidden;
@@ -2287,6 +2582,28 @@ DASHBOARD_HTML = """<!doctype html>
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
       font-size: 15px;
+    }
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px 10px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .panel-header h2 {
+      padding: 0;
+      border-bottom: 0;
+    }
+    .collapse-button {
+      min-width: 34px;
+      width: 34px;
+      padding: 0;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .panel.collapsed .collapsible-content {
+      display: none;
     }
     table {
       width: 100%;
@@ -2370,7 +2687,7 @@ DASHBOARD_HTML = """<!doctype html>
       gap: 8px;
       margin-top: 8px;
     }
-    .action-form input {
+    .action-form input, .action-form select, .action-form textarea {
       width: 100%;
     }
     .action-row {
@@ -2486,14 +2803,44 @@ DASHBOARD_HTML = """<!doctype html>
         <div id="devices"></div>
       </div>
       <div>
-        <div class="panel">
-          <h2>Startup</h2>
-          <div class="diagnostics" id="diagnostics"></div>
+        <div class="panel collapsible-panel" data-panel-id="startup">
+          <div class="panel-header">
+            <h2>Startup</h2>
+            <button class="collapse-button" type="button" aria-label="Toggle Startup" aria-expanded="true">-</button>
+          </div>
+          <div class="diagnostics collapsible-content" id="diagnostics"></div>
+        </div>
+        <div style="height:18px"></div>
+        <div class="panel collapsible-panel" data-panel-id="actions">
+          <div class="panel-header">
+            <h2>Actions</h2>
+            <button class="collapse-button" type="button" aria-label="Toggle Actions" aria-expanded="true">-</button>
+          </div>
+          <div class="events collapsible-content" id="actions"></div>
         </div>
         <div style="height:18px"></div>
         <div class="panel">
-          <h2>Actions</h2>
-          <div class="events" id="actions"></div>
+          <h2>Simulate Transcript</h2>
+          <div class="events">
+            <div class="event">
+              <div class="action-form command-form">
+                <input id="simulateTranscript" type="text" value="status" autocomplete="off">
+                <input id="simulateDeviceId" type="text" value="dashboard" autocomplete="off">
+                <div class="action-row">
+                  <button id="simulateButton" type="button">Run</button>
+                  <span class="meta" id="simulateResult"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="height:18px"></div>
+        <div class="panel collapsible-panel" data-panel-id="eventRules">
+          <div class="panel-header">
+            <h2>Event Rules</h2>
+            <button class="collapse-button" type="button" aria-label="Toggle Event Rules" aria-expanded="true">-</button>
+          </div>
+          <div class="events collapsible-content" id="rules"></div>
         </div>
         <div style="height:18px"></div>
         <div class="panel">
@@ -2501,9 +2848,12 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="events" id="timers"></div>
         </div>
         <div style="height:18px"></div>
-        <div class="panel">
-          <h2>Recent Commands</h2>
-          <div class="events" id="commands"></div>
+        <div class="panel collapsible-panel" data-panel-id="recentCommands">
+          <div class="panel-header">
+            <h2>Recent Commands</h2>
+            <button class="collapse-button" type="button" aria-label="Toggle Recent Commands" aria-expanded="true">-</button>
+          </div>
+          <div class="events collapsible-content" id="commands"></div>
         </div>
         <div style="height:18px"></div>
         <div class="panel">
@@ -2565,6 +2915,27 @@ DASHBOARD_HTML = """<!doctype html>
       return node;
     }
 
+    function setPanelCollapsed(panel, collapsed) {
+      panel.classList.toggle("collapsed", collapsed);
+      const button = panel.querySelector(".collapse-button");
+      if (button) {
+        button.textContent = collapsed ? "+" : "-";
+        button.setAttribute("aria-expanded", String(!collapsed));
+      }
+      localStorage.setItem(`dashboard-panel-${panel.dataset.panelId}`, collapsed ? "1" : "0");
+    }
+
+    function initCollapsiblePanels() {
+      for (const panel of document.querySelectorAll(".collapsible-panel")) {
+        const saved = localStorage.getItem(`dashboard-panel-${panel.dataset.panelId}`);
+        setPanelCollapsed(panel, saved === "1");
+        const button = panel.querySelector(".collapse-button");
+        if (button) {
+          button.addEventListener("click", () => setPanelCollapsed(panel, !panel.classList.contains("collapsed")));
+        }
+      }
+    }
+
     function renderStats(data) {
       const stats = document.getElementById("stats");
       stats.replaceChildren();
@@ -2574,6 +2945,7 @@ DASHBOARD_HTML = """<!doctype html>
         ["Offline", data.summary.offline_count],
         ["Pending Events", data.summary.pending_event_count],
         ["Timers", data.summary.active_timer_count],
+        ["Rules", data.summary.rule_count],
         ["Commands", data.summary.recent_command_count],
         ["Buttons", data.summary.recent_button_event_count],
         ["Firmware", (data.firmware_catalog || []).length],
@@ -2855,6 +3227,34 @@ DASHBOARD_HTML = """<!doctype html>
       button.disabled = false;
     }
 
+    async function simulateTranscript() {
+      const button = document.getElementById("simulateButton");
+      const transcriptInput = document.getElementById("simulateTranscript");
+      const deviceInput = document.getElementById("simulateDeviceId");
+      const result = document.getElementById("simulateResult");
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Running";
+      result.textContent = "";
+      try {
+        const response = await fetch("/commands/simulate", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            transcript: transcriptInput.value,
+            device_id: deviceInput.value || "dashboard",
+          }),
+        });
+        const body = await response.json();
+        result.textContent = body.display_text || body.error || `HTTP ${response.status}`;
+        await refresh();
+      } catch (error) {
+        result.textContent = error.message;
+      }
+      button.textContent = original;
+      button.disabled = false;
+    }
+
     function renderActions(actions) {
       const root = document.getElementById("actions");
       root.replaceChildren();
@@ -2910,6 +3310,176 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function saveRule(form, result) {
+      const data = new FormData(form);
+      const steps = String(data.get("steps") || "")
+        .split("\\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          if (line.toLowerCase().startsWith("action:")) {
+            const value = line.slice(7).trim();
+            return {action_type: "action", action_name: value, action_transcript: `run action ${value}`};
+          }
+          if (line.toLowerCase().startsWith("transcript:")) {
+            return {action_type: "transcript", transcript: line.slice(11).trim()};
+          }
+          return {action_type: "transcript", transcript: line};
+        });
+      const payload = {
+        id: data.get("id"),
+        enabled: data.get("enabled") === "on",
+        name: data.get("name"),
+        event_type: data.get("event_type"),
+        device_id: data.get("device_id"),
+        button: data.get("button"),
+        capability: data.get("capability"),
+        command: data.get("command"),
+        steps,
+      };
+      try {
+        const response = await fetch("/rules", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        result.textContent = "Saved";
+        await refresh();
+      } catch (error) {
+        result.textContent = error.message;
+      }
+    }
+
+    async function toggleRule(rule) {
+      await fetch("/rules", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({...rule, enabled: !rule.enabled}),
+      });
+      await refresh();
+    }
+
+    async function testRule(ruleId) {
+      await fetch(`/rules/${encodeURIComponent(ruleId)}/test`, {method: "POST"});
+      await refresh();
+    }
+
+    async function deleteRule(ruleId) {
+      if (!window.confirm(`Remove rule ${ruleId}?`)) return;
+      await fetch(`/rules/${encodeURIComponent(ruleId)}`, {method: "DELETE"});
+      await refresh();
+    }
+
+    function stepsText(rule) {
+      const steps = rule.steps && rule.steps.length ? rule.steps : [{action_type: rule.action_type, transcript: rule.transcript, action_name: rule.action_name}];
+      return steps.map((step) => {
+        if (step.action_type === "action") return `action: ${step.action_name || ""}`;
+        return `transcript: ${step.transcript || ""}`;
+      }).join("\\n");
+    }
+
+    function populateRuleForm(form, rule, devices) {
+      form.querySelector('[name="id"]').value = rule.id || "";
+      form.querySelector('[name="name"]').value = rule.name || "";
+      form.querySelector('[name="event_type"]').value = rule.event_type || "button";
+      form.querySelector('[name="button"]').value = rule.button || "";
+      form.querySelector('[name="capability"]').value = rule.capability || "";
+      form.querySelector('[name="command"]').value = rule.command || "";
+      form.querySelector('[name="enabled"]').checked = rule.enabled !== false;
+      form.querySelector('[name="steps"]').value = stepsText(rule);
+      const deviceSelect = form.querySelector('select[name="device_id"]');
+      deviceSelect.replaceChildren(new Option("Any device", ""));
+      for (const device of devices || []) {
+        deviceSelect.append(new Option(`${device.display_name || device.id} (${device.id})`, device.id));
+      }
+      deviceSelect.value = rule.device_id || "";
+    }
+
+    function ruleForm(rule, devices, title) {
+      const formItem = el("div", "event");
+      formItem.append(el("div", "device-id", title));
+      const form = el("form", "action-form");
+      form.innerHTML = `
+        <input name="id" type="hidden">
+        <input name="name" type="text" placeholder="Rule name">
+        <select name="event_type">
+          <option value="button">Button event</option>
+          <option value="device_online">Device online</option>
+          <option value="device_offline">Device offline</option>
+          <option value="low_battery">Low battery</option>
+          <option value="timer_complete">Timer complete</option>
+          <option value="command">Voice/simulated command</option>
+          <option value="camera_event">Camera event</option>
+        </select>
+        <select name="device_id"></select>
+        <input name="button" type="text" placeholder="Button filter, optional">
+        <input name="capability" type="text" placeholder="Capability filter, optional">
+        <input name="command" type="text" placeholder="Command filter, optional">
+        <textarea name="steps" placeholder="One action per line. Use: transcript: set timer for 5 minutes notify phone OR action: notify phone"></textarea>
+        <label class="meta"><input name="enabled" type="checkbox" checked> Enabled</label>
+        <div class="action-row"><button type="submit">Save</button><span class="meta"></span></div>
+      `;
+      populateRuleForm(form, rule, devices);
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        saveRule(form, form.querySelector(".action-row .meta"));
+      });
+      formItem.append(form);
+      return formItem;
+    }
+
+    function renderRules(rules, devices, actions, runs) {
+      const root = document.getElementById("rules");
+      root.replaceChildren();
+
+      root.append(ruleForm({
+        id: "",
+        name: "Button rule",
+        event_type: "button",
+        enabled: true,
+        steps: [{action_type: "transcript", transcript: "set timer for 5 minutes notify phone"}],
+      }, devices, "New event rule"));
+
+      if (!rules || !rules.length) {
+        root.append(el("div", "empty", "No event rules configured."));
+      } else {
+        for (const rule of rules) {
+          const item = el("div", "event");
+          item.append(el("div", "device-id", rule.name || rule.id));
+          item.append(el("div", "meta", `${rule.enabled ? "enabled" : "disabled"} | ${rule.event_type} | ${rule.device_id || "any device"} | ${rule.button || "any button"}`));
+          item.append(el("div", "", `Steps: ${stepsText(rule).replaceAll("\\n", " | ")}`));
+          if (rule.last_result) item.append(el("div", "meta", `last: ${rule.last_result}`));
+          const row = el("div", "action-row");
+          const edit = el("button", "", "Edit");
+          edit.type = "button";
+          edit.addEventListener("click", () => item.replaceWith(ruleForm(rule, devices, `Edit: ${rule.name || rule.id}`)));
+          const toggle = el("button", "", rule.enabled ? "Disable" : "Enable");
+          toggle.type = "button";
+          toggle.addEventListener("click", () => toggleRule(rule));
+          const test = el("button", "", "Test");
+          test.type = "button";
+          test.addEventListener("click", () => testRule(rule.id));
+          const remove = el("button", "danger", "Remove");
+          remove.type = "button";
+          remove.addEventListener("click", () => deleteRule(rule.id));
+          row.append(edit, toggle, test, remove);
+          item.append(row);
+          root.append(item);
+        }
+      }
+
+      const recent = (runs || []).slice(-3).reverse();
+      for (const run of recent) {
+        const item = el("div", "event");
+        item.append(el("div", "device-id", `Rule run: ${run.rule_id}`));
+        item.append(el("div", "meta", `${run.ok ? "ok" : "failed"} | ${text(run.device_id)} | ${new Date(run.received_at * 1000).toLocaleTimeString()}`));
+        item.append(el("div", "", text(run.result)));
+        root.append(item);
+      }
+    }
+
     function stateDetails(state) {
       const details = [];
       if (!state || typeof state !== "object") return details;
@@ -2926,6 +3496,7 @@ DASHBOARD_HTML = """<!doctype html>
       renderStats(data);
       renderDiagnostics(data.server.diagnostics);
       renderActions(data.actions);
+      renderRules(data.rules, data.devices, data.actions, data.recent_rule_runs);
       renderTimers(data.active_timers);
       renderDevices(data.devices);
       renderFirmwareCatalog(data.firmware_catalog);
@@ -2964,11 +3535,16 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     document.getElementById("refreshButton").addEventListener("click", refresh);
+    document.getElementById("simulateButton").addEventListener("click", simulateTranscript);
+    document.getElementById("simulateTranscript").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") simulateTranscript();
+    });
     document.getElementById("cancelRemoveButton").addEventListener("click", closeRemoveModal);
     document.getElementById("confirmRemoveButton").addEventListener("click", removePendingDevice);
     document.getElementById("removeModal").addEventListener("click", (event) => {
       if (event.target.id === "removeModal") closeRemoveModal();
     });
+    initCollapsiblePanels();
     refresh();
     state.timer = setInterval(refresh, state.refreshMs);
   </script>
@@ -3364,6 +3940,19 @@ class CommandHandler(BaseHTTPRequestHandler):
                 payload = {"actions": list_script_actions()}
             json_response(self, 200, payload)
             return
+        if parsed.path == "/rules":
+            with STATE_LOCK:
+                payload = {
+                    "rules": [public_rule(rule_id, EVENT_RULES[rule_id]) for rule_id in sorted(EVENT_RULES)],
+                    "recent_rule_runs": RECENT_RULE_RUNS[-20:],
+                }
+            json_response(self, 200, payload)
+            return
+        if parsed.path == "/events/recent":
+            with STATE_LOCK:
+                payload = {"recent_rule_runs": RECENT_RULE_RUNS[-20:]}
+            json_response(self, 200, payload)
+            return
         if parsed.path == "/firmware/catalog":
             with STATE_LOCK:
                 payload = {"firmware": firmware_catalog_summary()}
@@ -3458,6 +4047,38 @@ class CommandHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/commands/simulate":
+            try:
+                payload = read_optional_json_body(self)
+                transcript_text = str(payload.get("transcript", "")).strip()[:500]
+                device_id = clean_device_id(str(payload.get("device_id", "dashboard")))
+                if not transcript_text:
+                    raise ValueError("transcript is required")
+                with STATE_LOCK:
+                    touch_device(device_id, self)
+                device_response = command_response(transcript_text, device_id)
+                record = {
+                    "device_id": device_id,
+                    "received_at": int(time.time()),
+                    "duration_ms": 0,
+                    "ok": bool(device_response.get("ok")),
+                    "text": transcript_text,
+                    "display_text": device_response["display_text"],
+                    "tone": device_response["tone"],
+                    "command": device_response.get("command"),
+                    "state": device_response.get("state", {}),
+                    "muted": MUTED_DEVICES.get(device_id, False),
+                    "transcript": {"text": transcript_text, "source": "simulated"},
+                }
+                with STATE_LOCK:
+                    record_command_result(record)
+                payload = dict(device_response)
+                payload["simulated"] = True
+                json_response(self, 200 if payload.get("ok") else 400, payload)
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
         if parsed.path.startswith("/actions/") and parsed.path.endswith("/run"):
             raw_name = unquote(parsed.path.removeprefix("/actions/").removesuffix("/run")).strip("/")
             try:
@@ -3515,6 +4136,43 @@ class CommandHandler(BaseHTTPRequestHandler):
                         for device_id in target_ids
                     }
                 json_response(self, 200, {"ok": True, "target_count": len(target_ids), "targets": target_ids, "events": events})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/events":
+            try:
+                payload = read_optional_json_body(self)
+                event_type = clean_rule_type(str(payload.get("event_type", payload.get("type", "custom"))))
+                device_id = clean_device_id(str(payload.get("device_id", ""))) if payload.get("device_id") else ""
+                extra = {
+                    str(key)[:40]: value
+                    for key, value in payload.items()
+                    if key not in {"event_type", "type", "device_id"} and isinstance(value, (str, int, float, bool))
+                }
+                with STATE_LOCK:
+                    dispatch_server_event(event_type, device_id, **extra)
+                json_response(self, 200, {"ok": True, "event_type": event_type, "device_id": device_id})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/rules":
+            try:
+                payload = read_optional_json_body(self)
+                with STATE_LOCK:
+                    rule = upsert_event_rule(payload)
+                json_response(self, 200, {"ok": True, "rule": rule})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path.startswith("/rules/") and parsed.path.endswith("/test"):
+            rule_id = clean_rule_id(parsed.path.removeprefix("/rules/").removesuffix("/test"))
+            try:
+                with STATE_LOCK:
+                    run = run_rule_test(rule_id)
+                json_response(self, 200, {"ok": True, "rule_id": rule_id, "run": run})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
@@ -3612,10 +4270,7 @@ class CommandHandler(BaseHTTPRequestHandler):
                 "transcript": transcript,
             }
             with STATE_LOCK:
-                update_device_result(device_id, device_response)
-                RECENT_COMMANDS.append(record)
-                del RECENT_COMMANDS[:-RECENT_HISTORY_LIMIT]
-                save_command_record(record)
+                record_command_result(record)
             json_response(self, 200, device_response)
         except Exception as exc:
             json_response(self, 400, {
@@ -3663,6 +4318,13 @@ class CommandHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/rules/"):
+            rule_id = clean_rule_id(parsed.path.removeprefix("/rules/"))
+            with STATE_LOCK:
+                existed = EVENT_RULES.pop(rule_id, None) is not None
+                save_event_rules()
+            json_response(self, 200, {"ok": True, "rule_id": rule_id, "removed": existed})
+            return
         if parsed.path.startswith("/firmware/catalog/"):
             parts = parsed.path.strip("/").split("/")
             if len(parts) not in (3, 4):
@@ -3694,6 +4356,7 @@ def main() -> None:
     load_script_actions()
     load_device_friendly_names()
     load_device_registry()
+    load_event_rules()
     threading.Thread(target=timer_worker, name="timer-worker", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), CommandHandler)
     print(f"Listening on http://{HOST}:{PORT}")
