@@ -52,6 +52,10 @@ RULES_PATH = os.environ.get(
     "COMMAND_SERVER_RULES_PATH",
     os.path.join(os.path.dirname(__file__), "rules.json"),
 )
+TIMER_STATE_PATH = os.environ.get(
+    "COMMAND_SERVER_TIMER_STATE_PATH",
+    os.path.join(os.path.dirname(__file__), "timers.json"),
+)
 DATABASE_PATH = os.environ.get(
     "COMMAND_SERVER_DATABASE_PATH",
     os.path.join(os.path.dirname(__file__), "server-state.sqlite3"),
@@ -1817,6 +1821,30 @@ def format_duration(seconds: int) -> str:
     return f"{minutes} min {sec} sec"
 
 
+def parse_timer_name(text: str) -> str:
+    normalized = " ".join(text.strip().split())
+    patterns = [
+        r"\bnamed\s+(.+?)(?=\s+(?:for|in)\b|$)",
+        r"\bcalled\s+(.+?)(?=\s+(?:for|in)\b|$)",
+        r"\bname\s+(.+?)(?=\s+(?:for|in)\b|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match:
+            return clean_friendly_name(match.group(1))
+    match = re.search(r"\bset\s+(?:a\s+)?(.+?)\s+timer\b", normalized, flags=re.IGNORECASE)
+    if match:
+        candidate = clean_friendly_name(match.group(1))
+        if candidate and candidate.lower() not in {"the", "a"}:
+            return candidate
+    match = re.search(r"\bstart\s+(?:a\s+)?(.+?)\s+timer\b", normalized, flags=re.IGNORECASE)
+    if match:
+        candidate = clean_friendly_name(match.group(1))
+        if candidate and candidate.lower() not in {"the", "a"}:
+            return candidate
+    return ""
+
+
 def parse_timer_request(text: str) -> tuple[int | None, str]:
     normalized = normalize_command_text(text)
     seconds = parse_duration_seconds(normalized)
@@ -1837,20 +1865,76 @@ def timer_mode_label(mode: str) -> str:
     return "this device"
 
 
-def schedule_timer(device_id: str, transcript: str, seconds: int, mode: str) -> dict[str, Any]:
+def clean_timer_mode(mode: str) -> str:
+    if mode in {"phone", "all_devices", "device"}:
+        return mode
+    return "device"
+
+
+def timer_display_name(timer: dict[str, Any]) -> str:
+    name = str(timer.get("name", "")).strip()
+    return name or "Timer"
+
+
+def save_timers() -> None:
+    directory = os.path.dirname(TIMER_STATE_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = {"timers": [ACTIVE_TIMERS[timer_id] for timer_id in sorted(ACTIVE_TIMERS)]}
+    temp_path = f"{TIMER_STATE_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, TIMER_STATE_PATH)
+
+
+def load_timers() -> None:
+    try:
+        with open(TIMER_STATE_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load timers: {exc}")
+        return
+
+    now = int(time.time())
+    for raw_timer in payload.get("timers", []) if isinstance(payload, dict) else []:
+        if not isinstance(raw_timer, dict):
+            continue
+        timer_id = clean_rule_id(str(raw_timer.get("id", "")) or uuid.uuid4().hex)
+        expires_at = int(raw_timer.get("expires_at", 0) or 0)
+        if expires_at <= now:
+            continue
+        ACTIVE_TIMERS[timer_id] = {
+            "id": timer_id,
+            "device_id": clean_device_id(str(raw_timer.get("device_id", "unknown"))),
+            "name": clean_friendly_name(str(raw_timer.get("name", ""))),
+            "created_at": int(raw_timer.get("created_at", now)),
+            "expires_at": expires_at,
+            "duration_seconds": int(raw_timer.get("duration_seconds", max(1, expires_at - now))),
+            "mode": clean_timer_mode(str(raw_timer.get("mode", "device"))),
+            "transcript": str(raw_timer.get("transcript", ""))[:500],
+        }
+
+
+def schedule_timer(device_id: str, transcript: str, seconds: int, mode: str, name: str = "") -> dict[str, Any]:
     timer_id = uuid.uuid4().hex
     now = int(time.time())
     timer = {
         "id": timer_id,
         "device_id": device_id,
+        "name": clean_friendly_name(name),
         "created_at": now,
         "expires_at": now + seconds,
         "duration_seconds": seconds,
-        "mode": mode,
+        "mode": clean_timer_mode(mode),
         "transcript": transcript,
     }
-    ACTIVE_TIMERS[timer_id] = timer
-    TIMER_CONDITION.notify_all()
+    with TIMER_CONDITION:
+        ACTIVE_TIMERS[timer_id] = timer
+        save_timers()
+        TIMER_CONDITION.notify_all()
     return timer
 
 
@@ -1859,11 +1943,38 @@ def active_timer_summary() -> list[dict[str, Any]]:
     return [
         {
             **timer,
+            "display_name": timer_display_name(timer),
             "remaining_seconds": max(0, int(timer.get("expires_at", now)) - now),
             "device_name": device_display_name(str(timer.get("device_id", "")), DEVICES.get(str(timer.get("device_id", "")), {})),
         }
         for timer in sorted(ACTIVE_TIMERS.values(), key=lambda item: int(item.get("expires_at", 0)))
     ]
+
+
+def cancel_timer(reference: str, device_id: str = "") -> dict[str, Any] | None:
+    with TIMER_CONDITION:
+        normalized_ref = normalize_command_text(reference)
+        matches = []
+        for timer_id, timer in ACTIVE_TIMERS.items():
+            if device_id and str(timer.get("device_id", "")) != device_id:
+                continue
+            names = [timer_id, str(timer.get("name", "")), str(timer.get("transcript", ""))]
+            if not normalized_ref:
+                matches.append((0, timer_id))
+                continue
+            for name in names:
+                normalized_name = normalize_command_text(name)
+                if normalized_name and (normalized_ref == normalized_name or normalized_ref in normalized_name):
+                    matches.append((len(normalized_name), timer_id))
+                    break
+        if not matches:
+            return None
+        matches.sort(reverse=True)
+        timer_id = matches[0][1]
+        timer = ACTIVE_TIMERS.pop(timer_id, None)
+        save_timers()
+        TIMER_CONDITION.notify_all()
+        return timer
 
 
 def fire_timer(timer: dict[str, Any]) -> None:
@@ -1894,6 +2005,8 @@ def timer_worker() -> None:
                 for timer_id, timer in list(ACTIVE_TIMERS.items())
                 if int(timer.get("expires_at", now + 1)) <= now
             ]
+            if due:
+                save_timers()
             if not due:
                 next_expiry = min((int(timer.get("expires_at", now + 60)) for timer in ACTIVE_TIMERS.values()), default=now + 60)
                 TIMER_CONDITION.wait(timeout=max(1, min(60, next_expiry - now)))
@@ -1908,14 +2021,16 @@ def timer_worker() -> None:
                 print(f"Timer failed: {exc}")
 
 
-def timer_response(transcript: str, device_id: str, duration_text: str, mode: str = "device") -> dict[str, Any]:
+def timer_response(transcript: str, device_id: str, duration_text: str, mode: str = "device", name: str = "") -> dict[str, Any]:
     seconds, parsed_mode = parse_timer_request(duration_text)
     mode = parsed_mode if parsed_mode != "device" else mode
+    name = clean_friendly_name(name or parse_timer_name(duration_text))
     if seconds is None or seconds <= 0:
         PENDING_ACTIONS[device_id] = {
             "command": "timer",
             "slot": "duration",
             "mode": mode,
+            "name": name,
             "prompt": "How long should the timer be?",
             "created_at": time.time(),
         }
@@ -1925,18 +2040,39 @@ def timer_response(transcript: str, device_id: str, duration_text: str, mode: st
             "How long should the timer be?",
             "error",
             command="timer",
-            state={"awaiting": "duration", "mode": mode},
+            state={"awaiting": "duration", "mode": mode, "name": name},
         ))
 
-    timer = schedule_timer(device_id, transcript, seconds, mode)
+    timer = schedule_timer(device_id, transcript, seconds, mode, name)
+    label = f"{name}: " if name else ""
     return apply_mute_state(device_id, base_response(
         True,
         transcript,
-        f"Timer set: {format_duration(seconds)} -> {timer_mode_label(mode)}",
+        f"Timer set: {label}{format_duration(seconds)} -> {timer_mode_label(mode)}",
         "success",
         command="timer",
         state=timer,
     ))
+
+
+def create_timer_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    device_id = clean_device_id(str(payload.get("device_id", "dashboard") or "dashboard"))
+    name = clean_friendly_name(str(payload.get("name", "")))
+    mode = clean_timer_mode(str(payload.get("mode", "device")))
+    duration_text = str(payload.get("duration_text", "")).strip()
+    seconds = None
+    if isinstance(payload.get("duration_seconds"), (int, float)):
+        seconds = int(payload["duration_seconds"])
+    if seconds is None and duration_text:
+        seconds, parsed_mode = parse_timer_request(duration_text)
+        if parsed_mode != "device":
+            mode = parsed_mode
+        if not name:
+            name = parse_timer_name(duration_text)
+    if seconds is None or seconds <= 0:
+        raise ValueError("duration_seconds or duration_text is required")
+    transcript = str(payload.get("transcript", "") or f"dashboard timer {name or format_duration(seconds)}")[:500]
+    return schedule_timer(device_id, transcript, seconds, mode, name)
 
 
 def handle_pending_action(device_id: str, text: str, normalized: str) -> dict[str, Any] | None:
@@ -1949,7 +2085,7 @@ def handle_pending_action(device_id: str, text: str, normalized: str) -> dict[st
         return None
 
     if pending.get("command") == "timer" and pending.get("slot") == "duration":
-        response = timer_response(text, device_id, text, str(pending.get("mode", "device")))
+        response = timer_response(text, device_id, text, str(pending.get("mode", "device")), str(pending.get("name", "")))
         if response.get("ok"):
             PENDING_ACTIONS.pop(device_id, None)
         return response
@@ -1999,7 +2135,7 @@ def handle_help(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
     return apply_mute_state(device_id, base_response(
         True,
         text,
-        "Commands: test, status, list devices, ping, mute, broadcast, timer, notify timer, run action.",
+        "Commands: test, status, list devices, ping, mute, broadcast, timer, list timers, cancel timer, run action.",
         "success",
         command="help",
     ))
@@ -2161,11 +2297,13 @@ def handle_repeat(text: str, device_id: str, remainder: str) -> dict[str, Any]:
 def handle_timer(text: str, device_id: str, remainder: str) -> dict[str, Any]:
     duration_text = remainder.strip()
     _seconds, mode = parse_timer_request(duration_text or text)
+    name = parse_timer_name(duration_text or text)
     if not duration_text:
         PENDING_ACTIONS[device_id] = {
             "command": "timer",
             "slot": "duration",
             "mode": mode,
+            "name": name,
             "prompt": "How long should the timer be?",
             "created_at": time.time(),
         }
@@ -2175,9 +2313,70 @@ def handle_timer(text: str, device_id: str, remainder: str) -> dict[str, Any]:
             "How long should the timer be?",
             "success",
             command="timer",
-            state={"awaiting": "duration", "mode": mode},
+            state={"awaiting": "duration", "mode": mode, "name": name},
         ))
-    return timer_response(text, device_id, duration_text, mode)
+    return timer_response(text, device_id, duration_text, mode, name)
+
+
+def handle_list_timers(text: str, device_id: str, _remainder: str) -> dict[str, Any]:
+    timers = active_timer_summary()
+    if not timers:
+        return apply_mute_state(device_id, base_response(
+            True,
+            text,
+            "No active timers.",
+            "success",
+            command="list_timers",
+            state={"timers": []},
+        ))
+
+    lines = []
+    for timer in timers[:6]:
+        label = str(timer.get("display_name", "Timer"))
+        remaining = format_duration(int(timer.get("remaining_seconds", 0)))
+        device_name = str(timer.get("device_name", timer.get("device_id", "")))
+        lines.append(f"{label}: {remaining} ({device_name})")
+    if len(timers) > len(lines):
+        lines.append(f"+{len(timers) - len(lines)} more")
+
+    return apply_mute_state(device_id, base_response(
+        True,
+        text,
+        "\n".join(lines),
+        "success",
+        command="list_timers",
+        state={"timers": timers},
+    ))
+
+
+def handle_cancel_timer(text: str, device_id: str, remainder: str) -> dict[str, Any]:
+    reference = remainder.strip()
+    normalized = normalize_command_text(reference)
+    if normalized.endswith(" timer"):
+        reference = reference[: -len(" timer")].strip()
+    timer = cancel_timer(reference, device_id)
+    if timer is None and reference:
+        timer = cancel_timer(reference, "")
+    if timer is None:
+        return apply_mute_state(device_id, base_response(
+            False,
+            text,
+            "Timer not found.",
+            "error",
+            command="cancel_timer",
+            state={"query": reference},
+        ))
+
+    label = timer_display_name(timer)
+    duration = format_duration(max(0, int(timer.get("expires_at", 0)) - int(time.time())))
+    return apply_mute_state(device_id, base_response(
+        True,
+        text,
+        f"Cancelled {label}: {duration} remaining.",
+        "success",
+        command="cancel_timer",
+        state={"timer": timer},
+    ))
 
 
 def script_action_response(text: str, device_id: str, action_name: str) -> dict[str, Any]:
@@ -2432,6 +2631,8 @@ COMMANDS: tuple[Command, ...] = (
     Command("help", ("help", "commands", "what can you do"), "Show available commands.", handle_help),
     Command("status", ("status", "server status"), "Show server/device state.", handle_status),
     Command("list_devices", ("list devices", "devices", "device list", "show devices"), "Show known devices and IP addresses.", handle_list_devices),
+    Command("list_timers", ("list timers", "show timers", "timers", "active timers"), "Show active timers.", handle_list_timers),
+    Command("cancel_timer", ("cancel timer", "cancel timers", "stop timer", "stop timers"), "Cancel an active timer.", handle_cancel_timer),
     Command("cancel", ("cancel", "stop", "nevermind", "never mind"), "Cancel a pending command.", handle_cancel),
     Command("repeat", ("repeat", "say"), "Display the spoken suffix.", handle_repeat),
     Command("timer", ("timer", "set timer", "set a timer", "start timer", "start a timer"), "Set a timer.", handle_timer),
@@ -2845,6 +3046,25 @@ DASHBOARD_HTML = """<!doctype html>
         <div style="height:18px"></div>
         <div class="panel">
           <h2>Timers</h2>
+          <div class="events">
+            <div class="event">
+              <div class="device-id">Create timer</div>
+              <form class="action-form" id="timerForm">
+                <input id="timerName" type="text" placeholder="Name, optional" autocomplete="off">
+                <input id="timerDuration" type="text" placeholder="Duration, e.g. 5 minutes" autocomplete="off">
+                <select id="timerMode">
+                  <option value="device">Alert selected device</option>
+                  <option value="all_devices">Alert all devices</option>
+                  <option value="phone">Phone notification</option>
+                </select>
+                <select id="timerDevice"></select>
+                <div class="action-row">
+                  <button type="submit">Start</button>
+                  <span class="meta" id="timerFormResult"></span>
+                </div>
+              </form>
+            </div>
+          </div>
           <div class="events" id="timers"></div>
         </div>
         <div style="height:18px"></div>
@@ -3294,7 +3514,61 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
-    function renderTimers(timers) {
+    function renderTimerDeviceOptions(devices) {
+      const select = document.getElementById("timerDevice");
+      const current = select.value || "dashboard";
+      select.replaceChildren(new Option("Dashboard", "dashboard"));
+      for (const device of devices || []) {
+        select.append(new Option(`${device.display_name || device.id} (${device.id})`, device.id));
+      }
+      select.value = Array.from(select.options).some((option) => option.value === current) ? current : "dashboard";
+    }
+
+    async function createTimer(event) {
+      event.preventDefault();
+      const result = document.getElementById("timerFormResult");
+      const payload = {
+        name: document.getElementById("timerName").value,
+        duration_text: document.getElementById("timerDuration").value,
+        mode: document.getElementById("timerMode").value,
+        device_id: document.getElementById("timerDevice").value || "dashboard",
+      };
+      try {
+        const response = await fetch("/timers", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        document.getElementById("timerDuration").value = "";
+        result.textContent = "Started";
+        await refresh();
+      } catch (error) {
+        result.textContent = error.message;
+      }
+    }
+
+    async function cancelTimer(timerId, button) {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Cancelling";
+      try {
+        const response = await fetch(`/timers/${encodeURIComponent(timerId)}`, {method: "DELETE"});
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        await refresh();
+      } catch (error) {
+        button.textContent = "Failed";
+        setTimeout(() => { button.textContent = original; button.disabled = false; }, 1200);
+        return;
+      }
+      button.textContent = original;
+      button.disabled = false;
+    }
+
+    function renderTimers(timers, devices) {
+      renderTimerDeviceOptions(devices);
       const root = document.getElementById("timers");
       root.replaceChildren();
       if (!timers || !timers.length) {
@@ -3303,9 +3577,16 @@ DASHBOARD_HTML = """<!doctype html>
       }
       for (const timer of timers) {
         const item = el("div", "event");
-        item.append(el("div", "device-id", `${text(timer.device_name)} -> ${text(timer.mode)}`));
+        item.append(el("div", "device-id", `${text(timer.display_name)} -> ${text(timer.mode)}`));
         item.append(el("div", "", `${text(timer.remaining_seconds)}s remaining of ${text(timer.duration_seconds)}s`));
+        item.append(el("div", "meta", `${text(timer.device_name)} | ${text(timer.id)}`));
         item.append(el("div", "meta", `expires ${new Date(timer.expires_at * 1000).toLocaleTimeString()}`));
+        const row = el("div", "action-row");
+        const cancel = el("button", "danger", "Cancel");
+        cancel.type = "button";
+        cancel.addEventListener("click", () => cancelTimer(timer.id, cancel));
+        row.append(cancel);
+        item.append(row);
         root.append(item);
       }
     }
@@ -3497,7 +3778,7 @@ DASHBOARD_HTML = """<!doctype html>
       renderDiagnostics(data.server.diagnostics);
       renderActions(data.actions);
       renderRules(data.rules, data.devices, data.actions, data.recent_rule_runs);
-      renderTimers(data.active_timers);
+      renderTimers(data.active_timers, data.devices);
       renderDevices(data.devices);
       renderFirmwareCatalog(data.firmware_catalog);
       renderEvents("commands", data.recent_commands, "No commands recorded.", (item, command) => {
@@ -3536,6 +3817,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     document.getElementById("refreshButton").addEventListener("click", refresh);
     document.getElementById("simulateButton").addEventListener("click", simulateTranscript);
+    document.getElementById("timerForm").addEventListener("submit", createTimer);
     document.getElementById("simulateTranscript").addEventListener("keydown", (event) => {
       if (event.key === "Enter") simulateTranscript();
     });
@@ -3897,7 +4179,11 @@ def command_response(transcript_text: str, device_id: str = "unknown") -> dict[s
         if not text:
             return apply_mute_state(device_id, base_response(False, "", "No speech heard.", "error"))
 
-        immediate_commands = {"mute", "mute all", "unmute", "unmute all", "status", "server status", "list devices", "devices", "device list", "show devices", "ping", "ping devices", "check devices", "check all devices", "help", "commands", "what can you do", "cancel", "stop", "nevermind", "never mind"}
+        immediate_commands = {"mute", "mute all", "unmute", "unmute all", "status", "server status", "list devices", "devices", "device list", "show devices", "list timers", "show timers", "timers", "active timers", "ping", "ping devices", "check devices", "check all devices", "help", "commands", "what can you do", "cancel", "stop", "cancel timer", "stop timer", "nevermind", "never mind"}
+        named_cancel = re.match(r"^(?:cancel|stop)\s+(.+?)\s+timer$", normalized)
+        if named_cancel:
+            return handle_cancel_timer(text, device_id, named_cancel.group(1))
+
         if normalized in immediate_commands or normalized.startswith("broadcast "):
             command = dispatch_command(text, device_id)
             if command is not None:
@@ -3906,6 +4192,9 @@ def command_response(transcript_text: str, device_id: str = "unknown") -> dict[s
         pending_response = handle_pending_action(device_id, text, normalized)
         if pending_response is not None:
             return pending_response
+
+        if re.match(r"^(?:set|start)\s+(?:a\s+)?\S.+\s+timer\b", normalized):
+            return handle_timer(text, device_id, text)
 
         command = dispatch_command(text, device_id)
         if command is not None:
@@ -3946,6 +4235,11 @@ class CommandHandler(BaseHTTPRequestHandler):
                     "rules": [public_rule(rule_id, EVENT_RULES[rule_id]) for rule_id in sorted(EVENT_RULES)],
                     "recent_rule_runs": RECENT_RULE_RUNS[-20:],
                 }
+            json_response(self, 200, payload)
+            return
+        if parsed.path == "/timers":
+            with STATE_LOCK:
+                payload = {"timers": active_timer_summary()}
             json_response(self, 200, payload)
             return
         if parsed.path == "/events/recent":
@@ -4167,6 +4461,17 @@ class CommandHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
 
+        if parsed.path == "/timers":
+            try:
+                payload = read_optional_json_body(self)
+                with STATE_LOCK:
+                    timer = create_timer_from_payload(payload)
+                    summary = active_timer_summary()
+                json_response(self, 200, {"ok": True, "timer": timer, "timers": summary})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
         if parsed.path.startswith("/rules/") and parsed.path.endswith("/test"):
             rule_id = clean_rule_id(parsed.path.removeprefix("/rules/").removesuffix("/test"))
             try:
@@ -4325,6 +4630,12 @@ class CommandHandler(BaseHTTPRequestHandler):
                 save_event_rules()
             json_response(self, 200, {"ok": True, "rule_id": rule_id, "removed": existed})
             return
+        if parsed.path.startswith("/timers/"):
+            timer_id = clean_rule_id(parsed.path.removeprefix("/timers/"))
+            with STATE_LOCK:
+                timer = cancel_timer(timer_id, "")
+            json_response(self, 200, {"ok": True, "timer_id": timer_id, "removed": timer is not None, "timer": timer})
+            return
         if parsed.path.startswith("/firmware/catalog/"):
             parts = parsed.path.strip("/").split("/")
             if len(parts) not in (3, 4):
@@ -4357,6 +4668,7 @@ def main() -> None:
     load_device_friendly_names()
     load_device_registry()
     load_event_rules()
+    load_timers()
     threading.Thread(target=timer_worker, name="timer-worker", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), CommandHandler)
     print(f"Listening on http://{HOST}:{PORT}")
