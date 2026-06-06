@@ -2711,6 +2711,29 @@ DASHBOARD_HTML = """<!doctype html>
       color: var(--muted);
       flex-wrap: wrap;
     }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      padding: 12px clamp(16px, 2.4vw, 36px) 0;
+      margin: 0 auto;
+      width: min(1880px, 100%);
+      overflow-x: auto;
+    }
+    .tab-button {
+      white-space: nowrap;
+      background: transparent;
+    }
+    .tab-button.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--panel);
+    }
+    .tab-panel {
+      display: none;
+    }
+    .tab-panel.active {
+      display: block;
+    }
     button, input, select, textarea {
       border: 1px solid var(--line);
       background: var(--panel);
@@ -2768,6 +2791,17 @@ DASHBOARD_HTML = """<!doctype html>
       grid-template-columns: minmax(900px, 1fr) minmax(360px, 440px);
       gap: 22px;
       align-items: start;
+    }
+    .overview-grid {
+      display: grid;
+      grid-template-columns: minmax(420px, 1.2fr) minmax(360px, 0.8fr);
+      gap: 22px;
+      align-items: start;
+    }
+    .panel-stack {
+      display: grid;
+      gap: 18px;
+      min-width: 0;
     }
     .grid > .panel {
       min-width: 0;
@@ -2897,6 +2931,78 @@ DASHBOARD_HTML = """<!doctype html>
       align-items: center;
       flex-wrap: wrap;
     }
+    .filter-bar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(150px, 200px));
+      gap: 10px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .filter-meta {
+      padding: 0 12px 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .device-list {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+    }
+    .device-row {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .device-summary {
+      display: grid;
+      grid-template-columns: minmax(220px, 1.4fr) minmax(140px, 0.75fr) minmax(140px, 0.8fr) minmax(150px, 0.9fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px;
+    }
+    .device-title {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .device-title .device-id {
+      font-size: 15px;
+    }
+    .device-detail {
+      display: none;
+      border-top: 1px solid var(--line);
+      padding: 12px;
+    }
+    .device-row.expanded .device-detail {
+      display: block;
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }
+    .detail-block {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      min-width: 0;
+    }
+    .detail-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: minmax(90px, 0.45fr) minmax(0, 1fr);
+      gap: 6px 10px;
+      font-size: 13px;
+    }
+    .kv-key {
+      color: var(--muted);
+    }
     .diagnostics {
       display: grid;
       gap: 8px;
@@ -2969,7 +3075,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
     @media (max-width: 900px) {
       header { align-items: flex-start; flex-direction: column; }
-      .grid { grid-template-columns: 1fr; }
+      .grid, .overview-grid { grid-template-columns: 1fr; }
+      .filter-bar { grid-template-columns: 1fr; }
+      .device-summary { grid-template-columns: 1fr; }
       table, thead, tbody, th, td, tr { display: block; }
       thead { display: none; }
       tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
@@ -2996,22 +3104,85 @@ DASHBOARD_HTML = """<!doctype html>
       <button id="refreshButton" type="button">Refresh</button>
     </div>
   </header>
+  <nav class="tabs" aria-label="Dashboard sections">
+    <button class="tab-button active" type="button" data-tab="overview">Overview</button>
+    <button class="tab-button" type="button" data-tab="devices">Devices</button>
+    <button class="tab-button" type="button" data-tab="events">Events</button>
+    <button class="tab-button" type="button" data-tab="rules">Rules</button>
+    <button class="tab-button" type="button" data-tab="actions">Actions</button>
+    <button class="tab-button" type="button" data-tab="firmware">Firmware</button>
+  </nav>
   <main>
-    <section class="stats" id="stats"></section>
-    <section class="grid">
+    <section class="tab-panel active" data-tab-panel="overview">
+      <section class="stats" id="stats"></section>
+      <section class="overview-grid">
+        <div class="panel-stack">
+          <div class="panel">
+            <h2>Attention</h2>
+            <div class="events" id="attention"></div>
+          </div>
+          <div class="panel">
+            <h2>Recent Activity</h2>
+            <div class="events" id="activity"></div>
+          </div>
+        </div>
+        <div class="panel-stack">
+          <div class="panel">
+            <h2>Timers</h2>
+            <div class="events">
+              <div class="event">
+                <div class="device-id">Create timer</div>
+                <form class="action-form" id="timerForm">
+                  <input id="timerName" type="text" placeholder="Name, optional" autocomplete="off">
+                  <input id="timerDuration" type="text" placeholder="Duration, e.g. 5 minutes" autocomplete="off">
+                  <select id="timerMode">
+                    <option value="device">Alert selected device</option>
+                    <option value="all_devices">Alert all devices</option>
+                    <option value="phone">Phone notification</option>
+                  </select>
+                  <select id="timerDevice"></select>
+                  <div class="action-row">
+                    <button type="submit">Start</button>
+                    <span class="meta" id="timerFormResult"></span>
+                  </div>
+                </form>
+              </div>
+            </div>
+            <div class="events" id="timers"></div>
+          </div>
+          <div class="panel collapsible-panel" data-panel-id="startup">
+            <div class="panel-header">
+              <h2>Startup</h2>
+              <button class="collapse-button" type="button" aria-label="Toggle Startup" aria-expanded="true">-</button>
+            </div>
+            <div class="diagnostics collapsible-content" id="diagnostics"></div>
+          </div>
+        </div>
+      </section>
+    </section>
+    <section class="tab-panel" data-tab-panel="devices">
       <div class="panel">
         <h2>Devices</h2>
+        <div class="filter-bar">
+          <input id="deviceSearch" type="search" placeholder="Search devices" autocomplete="off">
+          <select id="deviceStatusFilter">
+            <option value="">All statuses</option>
+            <option value="online">Online</option>
+            <option value="offline">Offline</option>
+          </select>
+          <select id="deviceTypeFilter">
+            <option value="">All types</option>
+          </select>
+          <select id="deviceCapabilityFilter">
+            <option value="">All capabilities</option>
+          </select>
+        </div>
+        <div class="filter-meta" id="deviceFilterMeta">Showing all devices</div>
         <div id="devices"></div>
       </div>
-      <div>
-        <div class="panel collapsible-panel" data-panel-id="startup">
-          <div class="panel-header">
-            <h2>Startup</h2>
-            <button class="collapse-button" type="button" aria-label="Toggle Startup" aria-expanded="true">-</button>
-          </div>
-          <div class="diagnostics collapsible-content" id="diagnostics"></div>
-        </div>
-        <div style="height:18px"></div>
+    </section>
+    <section class="tab-panel" data-tab-panel="actions">
+      <section class="grid">
         <div class="panel collapsible-panel" data-panel-id="actions">
           <div class="panel-header">
             <h2>Actions</h2>
@@ -3019,7 +3190,6 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
           <div class="events collapsible-content" id="actions"></div>
         </div>
-        <div style="height:18px"></div>
         <div class="panel">
           <h2>Simulate Transcript</h2>
           <div class="events">
@@ -3035,39 +3205,19 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
           </div>
         </div>
-        <div style="height:18px"></div>
-        <div class="panel collapsible-panel" data-panel-id="eventRules">
-          <div class="panel-header">
-            <h2>Event Rules</h2>
-            <button class="collapse-button" type="button" aria-label="Toggle Event Rules" aria-expanded="true">-</button>
-          </div>
-          <div class="events collapsible-content" id="rules"></div>
+      </section>
+    </section>
+    <section class="tab-panel" data-tab-panel="rules">
+      <div class="panel collapsible-panel" data-panel-id="eventRules">
+        <div class="panel-header">
+          <h2>Event Rules</h2>
+          <button class="collapse-button" type="button" aria-label="Toggle Event Rules" aria-expanded="true">-</button>
         </div>
-        <div style="height:18px"></div>
-        <div class="panel">
-          <h2>Timers</h2>
-          <div class="events">
-            <div class="event">
-              <div class="device-id">Create timer</div>
-              <form class="action-form" id="timerForm">
-                <input id="timerName" type="text" placeholder="Name, optional" autocomplete="off">
-                <input id="timerDuration" type="text" placeholder="Duration, e.g. 5 minutes" autocomplete="off">
-                <select id="timerMode">
-                  <option value="device">Alert selected device</option>
-                  <option value="all_devices">Alert all devices</option>
-                  <option value="phone">Phone notification</option>
-                </select>
-                <select id="timerDevice"></select>
-                <div class="action-row">
-                  <button type="submit">Start</button>
-                  <span class="meta" id="timerFormResult"></span>
-                </div>
-              </form>
-            </div>
-          </div>
-          <div class="events" id="timers"></div>
-        </div>
-        <div style="height:18px"></div>
+        <div class="events collapsible-content" id="rules"></div>
+      </div>
+    </section>
+    <section class="tab-panel" data-tab-panel="events">
+      <section class="grid">
         <div class="panel collapsible-panel" data-panel-id="recentCommands">
           <div class="panel-header">
             <h2>Recent Commands</h2>
@@ -3075,16 +3225,16 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
           <div class="events collapsible-content" id="commands"></div>
         </div>
-        <div style="height:18px"></div>
         <div class="panel">
           <h2>Button Events</h2>
           <div class="events" id="buttonEvents"></div>
         </div>
-        <div style="height:18px"></div>
-        <div class="panel">
-          <h2>Firmware Catalog</h2>
-          <div class="events" id="firmwareCatalog"></div>
-        </div>
+      </section>
+    </section>
+    <section class="tab-panel" data-tab-panel="firmware">
+      <div class="panel">
+        <h2>Firmware Catalog</h2>
+        <div class="events" id="firmwareCatalog"></div>
       </div>
     </section>
   </main>
@@ -3104,6 +3254,8 @@ DASHBOARD_HTML = """<!doctype html>
       refreshMs: 5000,
       timer: null,
       pendingRemoval: null,
+      devices: [],
+      expandedDevices: new Set(),
     };
 
     function text(value) {
@@ -3156,6 +3308,43 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function setActiveTab(tabName) {
+      for (const button of document.querySelectorAll(".tab-button")) {
+        button.classList.toggle("active", button.dataset.tab === tabName);
+      }
+      for (const panel of document.querySelectorAll(".tab-panel")) {
+        panel.classList.toggle("active", panel.dataset.tabPanel === tabName);
+      }
+      localStorage.setItem("dashboard-active-tab", tabName);
+    }
+
+    function initTabs() {
+      for (const button of document.querySelectorAll(".tab-button")) {
+        button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+      }
+      const saved = localStorage.getItem("dashboard-active-tab") || "overview";
+      const exists = document.querySelector(`.tab-button[data-tab="${saved}"]`);
+      setActiveTab(exists ? saved : "overview");
+    }
+
+    function initDeviceFilters() {
+      const saved = loadDeviceFilters();
+      document.getElementById("deviceSearch").value = saved.query || "";
+      document.getElementById("deviceStatusFilter").value = saved.status || "";
+      document.getElementById("deviceTypeFilter").value = saved.type || "";
+      document.getElementById("deviceCapabilityFilter").value = saved.capability || "";
+      for (const id of ["deviceSearch", "deviceStatusFilter", "deviceTypeFilter", "deviceCapabilityFilter"]) {
+        document.getElementById(id).addEventListener("input", () => {
+          saveDeviceFilters();
+          renderFilteredDevices();
+        });
+        document.getElementById(id).addEventListener("change", () => {
+          saveDeviceFilters();
+          renderFilteredDevices();
+        });
+      }
+    }
+
     function renderStats(data) {
       const stats = document.getElementById("stats");
       stats.replaceChildren();
@@ -3175,6 +3364,92 @@ DASHBOARD_HTML = """<!doctype html>
         card.append(el("div", "label", label));
         card.append(el("span", "value", value));
         stats.append(card);
+      }
+    }
+
+    function batteryPercent(device) {
+      const status = device.status || {};
+      for (const key of ["battery_percent", "battery_pct", "battery_level", "battery"]) {
+        const value = status[key];
+        if (Number.isFinite(value)) return value > 1 ? value : value * 100;
+      }
+      return null;
+    }
+
+    function renderAttention(devices) {
+      const root = document.getElementById("attention");
+      root.replaceChildren();
+      const items = [];
+      for (const device of devices || []) {
+        const battery = batteryPercent(device);
+        if (!device.online) {
+          items.push({
+            level: "offline",
+            title: `${device.display_name || device.id} offline`,
+            detail: `${device.id} | ${text(device.online_detail)} | ${age(device.age_seconds)}`,
+          });
+        } else if (battery !== null && battery <= 20) {
+          items.push({
+            level: "battery",
+            title: `${device.display_name || device.id} low battery`,
+            detail: `${Math.round(battery)}% | ${device.id}`,
+          });
+        } else if (device.pending_events) {
+          items.push({
+            level: "events",
+            title: `${device.display_name || device.id} has queued events`,
+            detail: `${device.pending_events} event(s) queued | ${device.id}`,
+          });
+        }
+      }
+      if (!items.length) {
+        root.append(el("div", "empty", "No device issues need attention."));
+        return;
+      }
+      for (const item of items.slice(0, 8)) {
+        const row = el("div", "event");
+        row.append(el("div", "device-id", item.title));
+        row.append(el("div", "meta", item.detail));
+        root.append(row);
+      }
+    }
+
+    function renderActivity(data) {
+      const root = document.getElementById("activity");
+      root.replaceChildren();
+      const items = [];
+      for (const command of data.recent_commands || []) {
+        items.push({
+          at: command.received_at || 0,
+          title: `Command: ${text(command.command)}`,
+          detail: `${text(command.device_id)} | heard: ${text(command.text)} | ${text(command.display_text)}`,
+        });
+      }
+      for (const event of data.recent_button_events || []) {
+        items.push({
+          at: event.received_at || 0,
+          title: `Button: ${text(event.button)}`,
+          detail: `${text(event.device_id)} | gpio ${text(event.gpio)} | count ${text(event.click_count)}`,
+        });
+      }
+      for (const run of data.recent_rule_runs || []) {
+        items.push({
+          at: run.received_at || 0,
+          title: `Rule: ${text(run.rule_id)}`,
+          detail: `${run.ok ? "ok" : "failed"} | ${text(run.device_id)} | ${text(run.result)}`,
+        });
+      }
+      items.sort((a, b) => b.at - a.at);
+      if (!items.length) {
+        root.append(el("div", "empty", "No recent activity."));
+        return;
+      }
+      for (const item of items.slice(0, 10)) {
+        const row = el("div", "event");
+        row.append(el("div", "device-id", item.title));
+        row.append(el("div", "meta", item.at ? new Date(item.at * 1000).toLocaleTimeString() : "-"));
+        row.append(el("div", "", item.detail));
+        root.append(row);
       }
     }
 
@@ -3213,6 +3488,14 @@ DASHBOARD_HTML = """<!doctype html>
       return wrap;
     }
 
+    function limitedChips(items, limit = 4) {
+      const visible = (items || []).slice(0, limit);
+      const wrap = chips(visible);
+      const remaining = (items || []).length - visible.length;
+      if (remaining > 0) wrap.append(el("span", "chip", `+${remaining}`));
+      return wrap;
+    }
+
     function firmwareDetails(device) {
       const firmware = device.firmware || {};
       const project = device.firmware_project || firmware.project || "";
@@ -3232,6 +3515,131 @@ DASHBOARD_HTML = """<!doctype html>
       if (target) wrap.append(el("div", "meta", `target: ${target}`));
       if (deviceType) wrap.append(el("div", "meta", `type: ${deviceType}`));
       return wrap;
+    }
+
+    function firmwareSummary(device) {
+      const firmware = device.firmware || {};
+      return device.firmware_version || firmware.version || device.firmware_project || firmware.project || "No firmware";
+    }
+
+    function deviceSearchText(device) {
+      const fields = [
+        device.id,
+        device.friendly_name,
+        device.display_name,
+        device.ip,
+        device.remote_addr,
+        device.type,
+        device.model,
+        device.device_type,
+        device.firmware_version,
+        device.firmware_project,
+        ...(device.capabilities || []),
+        ...Object.values(device.status || {}),
+      ];
+      return fields.map((value) => text(value).toLowerCase()).join(" ");
+    }
+
+    function selectedDeviceFilters() {
+      return {
+        query: document.getElementById("deviceSearch")?.value.trim().toLowerCase() || "",
+        status: document.getElementById("deviceStatusFilter")?.value || "",
+        type: document.getElementById("deviceTypeFilter")?.value || "",
+        capability: document.getElementById("deviceCapabilityFilter")?.value || "",
+      };
+    }
+
+    function saveDeviceFilters() {
+      localStorage.setItem("dashboard-device-filters", JSON.stringify(selectedDeviceFilters()));
+    }
+
+    function loadDeviceFilters() {
+      try {
+        return JSON.parse(localStorage.getItem("dashboard-device-filters") || "{}");
+      } catch (_error) {
+        return {};
+      }
+    }
+
+    function deviceMatchesFilters(device, filters) {
+      if (filters.query && !deviceSearchText(device).includes(filters.query)) return false;
+      if (filters.status === "online" && !device.online) return false;
+      if (filters.status === "offline" && device.online) return false;
+      if (filters.type && device.type !== filters.type) return false;
+      if (filters.capability && !(device.capabilities || []).includes(filters.capability)) return false;
+      return true;
+    }
+
+    function populateDeviceFilterOptions(devices) {
+      const saved = loadDeviceFilters();
+      const typeSelect = document.getElementById("deviceTypeFilter");
+      const capabilitySelect = document.getElementById("deviceCapabilityFilter");
+      const currentType = typeSelect.value || saved.type || "";
+      const currentCapability = capabilitySelect.value || saved.capability || "";
+      const types = [...new Set((devices || []).map((device) => device.type).filter(Boolean))].sort();
+      const capabilities = [...new Set((devices || []).flatMap((device) => device.capabilities || []))].sort();
+
+      typeSelect.replaceChildren(new Option("All types", ""));
+      for (const type of types) typeSelect.append(new Option(type, type));
+      typeSelect.value = types.includes(currentType) ? currentType : "";
+
+      capabilitySelect.replaceChildren(new Option("All capabilities", ""));
+      for (const capability of capabilities) capabilitySelect.append(new Option(capability, capability));
+      capabilitySelect.value = capabilities.includes(currentCapability) ? currentCapability : "";
+    }
+
+    function filteredDevices(devices) {
+      const filters = selectedDeviceFilters();
+      return (devices || []).filter((device) => deviceMatchesFilters(device, filters));
+    }
+
+    function renderDeviceFilterMeta(filtered, total) {
+      const root = document.getElementById("deviceFilterMeta");
+      const filters = selectedDeviceFilters();
+      const active = [];
+      if (filters.query) active.push(`search "${filters.query}"`);
+      if (filters.status) active.push(filters.status);
+      if (filters.type) active.push(filters.type);
+      if (filters.capability) active.push(filters.capability);
+      const suffix = active.length ? ` | ${active.join(", ")}` : "";
+      root.textContent = `Showing ${filtered.length} of ${total} device${total === 1 ? "" : "s"}${suffix}`;
+    }
+
+    function renderFilteredDevices() {
+      const devices = filteredDevices(state.devices);
+      renderDeviceFilterMeta(devices, state.devices.length);
+      renderDevices(devices);
+    }
+
+    function toggleDeviceDetails(deviceId) {
+      if (state.expandedDevices.has(deviceId)) {
+        state.expandedDevices.delete(deviceId);
+      } else {
+        state.expandedDevices.add(deviceId);
+      }
+      localStorage.setItem("dashboard-expanded-devices", JSON.stringify([...state.expandedDevices]));
+      renderFilteredDevices();
+    }
+
+    function initExpandedDevices() {
+      try {
+        state.expandedDevices = new Set(JSON.parse(localStorage.getItem("dashboard-expanded-devices") || "[]"));
+      } catch (_error) {
+        state.expandedDevices = new Set();
+      }
+    }
+
+    function keyValueRows(entries) {
+      const wrap = el("div", "kv");
+      for (const [key, value] of entries) {
+        wrap.append(el("div", "kv-key", key));
+        wrap.append(el("div", "", text(value)));
+      }
+      return wrap;
+    }
+
+    function objectRows(object) {
+      return Object.entries(object || {}).map(([key, value]) => [key, typeof value === "object" ? JSON.stringify(value) : value]);
     }
 
     async function saveFriendlyName(deviceId, input, button) {
@@ -3314,62 +3722,96 @@ DASHBOARD_HTML = """<!doctype html>
         root.append(el("div", "empty", "No devices have registered yet."));
         return;
       }
-      const table = el("table");
-      const thead = document.createElement("thead");
-      thead.innerHTML = "<tr><th>Device</th><th>Status</th><th>Type</th><th>Firmware</th><th>Capabilities</th><th>Endpoints</th><th>Last Result</th><th>Actions</th></tr>";
-      const tbody = document.createElement("tbody");
+      const list = el("div", "device-list");
       for (const device of devices) {
-        const tr = document.createElement("tr");
-        const tdDevice = document.createElement("td");
-        tdDevice.dataset.label = "Device";
-        tdDevice.append(el("div", "device-id", device.id));
-        tdDevice.append(el("div", "meta", `${text(device.display_name)} | ${text(device.ip)}`));
-        tdDevice.append(friendlyNameForm(device));
+        const row = el("div", `device-row ${state.expandedDevices.has(device.id) ? "expanded" : ""}`);
+        const summary = el("div", "device-summary");
+        const title = el("div", "device-title");
+        title.append(el("div", "device-id", text(device.display_name || device.id)));
+        title.append(el("div", "meta", `${text(device.id)} | ${text(device.ip)}`));
 
-        const tdStatus = document.createElement("td");
-        tdStatus.dataset.label = "Status";
+        const statusBlock = el("div");
         const status = el("span", `status ${device.online ? "online" : ""}`);
         status.append(el("span", "dot"));
         status.append(el("span", "", device.online ? "Online" : "Offline"));
-        tdStatus.append(status);
-        tdStatus.append(el("div", "meta", `${text(device.online_detail)} | ${age(device.age_seconds)}`));
-        if (device.muted) tdStatus.append(el("div", "meta", "Muted"));
-        if (device.pending_events) tdStatus.append(el("div", "meta", `${device.pending_events} event(s) queued`));
+        statusBlock.append(status);
+        statusBlock.append(el("div", "meta", `${text(device.online_detail)} | ${age(device.age_seconds)}`));
+        if (device.muted) statusBlock.append(el("div", "meta", "Muted"));
+        if (device.pending_events) statusBlock.append(el("div", "meta", `${device.pending_events} event(s) queued`));
 
-        const tdType = document.createElement("td");
-        tdType.dataset.label = "Type";
-        tdType.textContent = text(device.type);
-        tdType.append(el("div", "meta", text(device.model)));
+        const typeBlock = el("div");
+        typeBlock.append(el("div", "device-id", text(device.type)));
+        typeBlock.append(el("div", "meta", text(device.model)));
 
-        const tdFirmware = document.createElement("td");
-        tdFirmware.dataset.label = "Firmware";
-        tdFirmware.append(firmwareDetails(device));
+        const firmwareBlock = el("div");
+        firmwareBlock.append(el("div", "device-id", firmwareSummary(device)));
 
-        const tdCaps = document.createElement("td");
-        tdCaps.dataset.label = "Capabilities";
-        tdCaps.append(chips(device.capabilities));
-
-        const tdEndpoints = document.createElement("td");
-        tdEndpoints.dataset.label = "Endpoints";
-        tdEndpoints.append(endpointLinks(device.id, device.endpoints, device.proxy_endpoints));
-
-        const tdLast = document.createElement("td");
-        tdLast.dataset.label = "Last Result";
-        tdLast.append(el("div", "", text(device.last_command)));
-        tdLast.append(el("div", "meta", text(device.last_display_text)));
-
-        const tdActions = document.createElement("td");
-        tdActions.dataset.label = "Actions";
+        const actions = el("div", "action-row");
+        const detailsButton = el("button", "", state.expandedDevices.has(device.id) ? "Hide Details" : "Details");
+        detailsButton.type = "button";
+        detailsButton.addEventListener("click", () => toggleDeviceDetails(device.id));
         const removeButton = el("button", "danger", "Remove");
         removeButton.type = "button";
         removeButton.addEventListener("click", () => openRemoveModal(device));
-        tdActions.append(removeButton);
+        actions.append(detailsButton, removeButton);
 
-        tr.append(tdDevice, tdStatus, tdType, tdFirmware, tdCaps, tdEndpoints, tdLast, tdActions);
-        tbody.append(tr);
+        summary.append(title, statusBlock, typeBlock, firmwareBlock, actions);
+
+        const detail = el("div", "device-detail");
+        const grid = el("div", "detail-grid");
+        const identity = el("div", "detail-block");
+        identity.append(el("div", "detail-title", "Identity"));
+        identity.append(friendlyNameForm(device));
+        identity.append(keyValueRows([
+          ["Device ID", device.id],
+          ["Display name", device.display_name],
+          ["Type", device.type],
+          ["Model", device.model],
+          ["IP", device.ip],
+          ["Remote addr", device.remote_addr],
+        ]));
+
+        const stateBlock = el("div", "detail-block");
+        stateBlock.append(el("div", "detail-title", "State"));
+        stateBlock.append(keyValueRows([
+          ["Online", device.online ? "yes" : "no"],
+          ["Detail", device.online_detail],
+          ["Last seen", age(device.age_seconds)],
+          ["Requests", device.request_count],
+          ["Pending events", device.pending_events],
+          ["Muted", device.muted ? "yes" : "no"],
+        ]));
+
+        const firmware = el("div", "detail-block");
+        firmware.append(el("div", "detail-title", "Firmware"));
+        firmware.append(firmwareDetails(device));
+
+        const caps = el("div", "detail-block");
+        caps.append(el("div", "detail-title", "Capabilities"));
+        caps.append(chips(device.capabilities));
+
+        const endpoints = el("div", "detail-block");
+        endpoints.append(el("div", "detail-title", "Endpoints"));
+        endpoints.append(endpointLinks(device.id, device.endpoints, device.proxy_endpoints));
+
+        const statusFields = el("div", "detail-block");
+        statusFields.append(el("div", "detail-title", "Status Fields"));
+        statusFields.append(keyValueRows(objectRows(device.status)));
+
+        const lastResult = el("div", "detail-block");
+        lastResult.append(el("div", "detail-title", "Last Result"));
+        lastResult.append(keyValueRows([
+          ["Command", device.last_command],
+          ["Transcript", device.last_transcript],
+          ["Display", device.last_display_text],
+        ]));
+
+        grid.append(identity, stateBlock, firmware, caps, endpoints, statusFields, lastResult);
+        detail.append(grid);
+        row.append(summary, detail);
+        list.append(row);
       }
-      table.append(thead, tbody);
-      root.append(table);
+      root.append(list);
     }
 
     function renderEvents(id, events, emptyText, mapper) {
@@ -3775,11 +4217,15 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("serverMeta").textContent =
         `Listening on ${data.server.host}:${data.server.port} | uptime ${uptime(data.server.uptime_seconds)} | stale after ${data.server.device_stale_seconds}s`;
       renderStats(data);
+      renderAttention(data.devices);
+      renderActivity(data);
       renderDiagnostics(data.server.diagnostics);
       renderActions(data.actions);
       renderRules(data.rules, data.devices, data.actions, data.recent_rule_runs);
       renderTimers(data.active_timers, data.devices);
-      renderDevices(data.devices);
+      state.devices = data.devices || [];
+      populateDeviceFilterOptions(state.devices);
+      renderFilteredDevices();
       renderFirmwareCatalog(data.firmware_catalog);
       renderEvents("commands", data.recent_commands, "No commands recorded.", (item, command) => {
         item.append(el("div", "device-id", text(command.command)));
@@ -3827,6 +4273,9 @@ DASHBOARD_HTML = """<!doctype html>
       if (event.target.id === "removeModal") closeRemoveModal();
     });
     initCollapsiblePanels();
+    initTabs();
+    initExpandedDevices();
+    initDeviceFilters();
     refresh();
     state.timer = setInterval(refresh, state.refreshMs);
   </script>
