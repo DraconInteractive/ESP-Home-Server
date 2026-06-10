@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -33,6 +34,7 @@ DEVICE_TOKENS_PATH = os.environ.get(
     "RELAY_DEVICE_TOKENS_PATH",
     os.path.join(os.path.dirname(__file__), "device-tokens.json"),
 )
+DEVICE_ENROLL_TOKEN = os.environ.get("RELAY_DEVICE_ENROLL_TOKEN", "")
 SYNC_TOKEN = os.environ.get("RELAY_SYNC_TOKEN", "")
 DASHBOARD_TOKEN = os.environ.get("RELAY_DASHBOARD_TOKEN", "")
 ADMIN_TOKEN = os.environ.get("RELAY_ADMIN_TOKEN", DASHBOARD_TOKEN)
@@ -151,6 +153,22 @@ def load_device_tokens() -> dict[str, str]:
     return result
 
 
+def save_device_tokens(tokens: dict[str, str]) -> None:
+    directory = os.path.dirname(DEVICE_TOKENS_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = {"devices": {device_id: tokens[device_id] for device_id in sorted(tokens)}}
+    temp_path = f"{DEVICE_TOKENS_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, DEVICE_TOKENS_PATH)
+
+
+def generate_device_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
 def require_device_token(handler: BaseHTTPRequestHandler, device_id: str) -> AuthResult:
     tokens = load_device_tokens()
     expected = tokens.get(device_id)
@@ -159,6 +177,28 @@ def require_device_token(handler: BaseHTTPRequestHandler, device_id: str) -> Aut
     if token_matches(expected, token_from_header(handler)):
         return AuthResult(True, HTTPStatus.OK, "")
     return AuthResult(False, HTTPStatus.UNAUTHORIZED, "unauthorized")
+
+
+def authorize_registration(handler: BaseHTTPRequestHandler, device_id: str) -> tuple[AuthResult, str | None]:
+    provided = token_from_header(handler)
+    tokens = load_device_tokens()
+    existing = tokens.get(device_id)
+    if existing:
+        if token_matches(existing, provided):
+            return AuthResult(True, HTTPStatus.OK, ""), None
+        if token_matches(DEVICE_ENROLL_TOKEN, provided):
+            return AuthResult(True, HTTPStatus.OK, ""), None
+        return AuthResult(False, HTTPStatus.UNAUTHORIZED, "unauthorized"), None
+
+    if not DEVICE_ENROLL_TOKEN:
+        return AuthResult(False, HTTPStatus.SERVICE_UNAVAILABLE, "device enrollment token is not configured"), None
+    if not token_matches(DEVICE_ENROLL_TOKEN, provided):
+        return AuthResult(False, HTTPStatus.UNAUTHORIZED, "unauthorized"), None
+
+    device_secret = generate_device_token()
+    tokens[device_id] = device_secret
+    save_device_tokens(tokens)
+    return AuthResult(True, HTTPStatus.OK, ""), device_secret
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -669,7 +709,7 @@ class RelayHandler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/devices/") and parsed.path.endswith("/register"):
             device_id = clean_id(parsed.path.removeprefix("/devices/").removesuffix("/register"))
-            auth = require_device_token(self, device_id)
+            auth, device_secret = authorize_registration(self, device_id)
             if not auth.ok:
                 auth_error(self, auth)
                 return
@@ -678,7 +718,10 @@ class RelayHandler(BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     device = upsert_device(device_id, payload, self)
                     event = queue_register_event(device_id, payload)
-                json_response(self, 200, {"ok": True, "device": device, "relay_event": event})
+                response = {"ok": True, "device": device, "relay_event": event}
+                if device_secret:
+                    response["device_secret"] = device_secret
+                json_response(self, 200, response)
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
@@ -736,6 +779,8 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     init_database()
+    if not DEVICE_ENROLL_TOKEN:
+        print("WARNING: RELAY_DEVICE_ENROLL_TOKEN is not configured; new device enrollment will reject requests.")
     if not SYNC_TOKEN:
         print("WARNING: RELAY_SYNC_TOKEN is not configured; sync endpoints will reject requests.")
     if not DASHBOARD_TOKEN:

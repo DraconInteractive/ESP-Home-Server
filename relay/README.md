@@ -26,9 +26,35 @@ relay.dracon.au {
 }
 ```
 
-## Device Tokens
+## Device Enrollment
 
-Create `device-tokens.json` on the relay server:
+Set `RELAY_DEVICE_ENROLL_TOKEN` in `.env.local`. A new device uses that token
+once when calling `/register`; the relay generates a per-device secret, stores it
+in `device-tokens.json`, and returns it in the registration response.
+
+First registration request:
+
+```http
+Authorization: Bearer <device-enrollment-token>
+```
+
+First registration response includes:
+
+```json
+{
+  "ok": true,
+  "device_secret": "generated-device-secret"
+}
+```
+
+The remote device should persist that `device_secret` and use it for later
+registration updates and button events:
+
+```http
+Authorization: Bearer generated-device-secret
+```
+
+The generated token file has this shape:
 
 ```json
 {
@@ -36,12 +62,6 @@ Create `device-tokens.json` on the relay server:
     "remote-button-01": "long-random-device-secret"
   }
 }
-```
-
-Remote devices authenticate with:
-
-```http
-Authorization: Bearer long-random-device-secret
 ```
 
 ## Endpoints
@@ -92,7 +112,7 @@ Register a remote button:
 
 ```sh
 curl https://relay.dracon.au/devices/remote-button-01/register \
-  -H 'Authorization: Bearer long-random-device-secret' \
+  -H 'Authorization: Bearer replace-with-device-enrollment-token' \
   -H 'Content-Type: application/json' \
   --data '{"type":"button","model":"Seeed XIAO ESP32-C3","capabilities":["button"],"status":{"battery_percent":95}}'
 ```
@@ -101,7 +121,7 @@ Record a button press:
 
 ```sh
 curl https://relay.dracon.au/devices/remote-button-01/button \
-  -H 'Authorization: Bearer long-random-device-secret' \
+  -H 'Authorization: Bearer generated-device-secret' \
   -H 'Content-Type: application/json' \
   --data '{"event":"click","button":"D10","gpio":10,"click_count":1}'
 ```
