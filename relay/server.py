@@ -504,54 +504,118 @@ DASHBOARD_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dracon Relay</title>
   <style>
-    :root { color-scheme: light dark; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
-    body { margin: 0; background: #f7f7f4; color: #1f2933; }
-    header { border-bottom: 1px solid #d7d7d2; background: #ffffff; padding: 18px 24px; }
-    main { max-width: 1100px; margin: 0 auto; padding: 22px; }
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --panel-soft: #f9faf8;
+      --text: #20252b;
+      --muted: #667085;
+      --border: #d9dee3;
+      --accent: #0f766e;
+      --accent-soft: #e6f4f1;
+      --warn: #b7791f;
+      --warn-soft: #fff4db;
+      --ok: #27745a;
+      --ok-soft: #e8f5ee;
+      --bad: #9a3412;
+      --bad-soft: #fff0e8;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    header { border-bottom: 1px solid var(--border); background: var(--panel); }
+    .header-inner { max-width: 1180px; margin: 0 auto; padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    main { max-width: 1180px; margin: 0 auto; padding: 22px 24px 36px; }
     h1 { margin: 0; font-size: 1.35rem; }
-    h2 { margin: 24px 0 10px; font-size: 1rem; }
-    .muted { color: #667085; font-size: .9rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
-    .stat, .row { border: 1px solid #d7d7d2; border-radius: 8px; background: #fff; padding: 12px; }
-    .stat strong { display: block; font-size: 1.6rem; }
+    h2 { margin: 0; font-size: 1rem; }
+    .muted { color: var(--muted); font-size: .88rem; }
+    .top-status { text-align: right; white-space: nowrap; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 16px; }
+    .stat, .row { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+    .stat { padding: 13px 14px; border-top: 3px solid var(--accent); }
+    .stat strong { display: block; font-size: 1.55rem; margin-top: 4px; }
+    .stat span { text-transform: uppercase; letter-spacing: .04em; font-size: .72rem; }
     .rows { display: grid; gap: 8px; }
+    .section-title { margin: 24px 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .section-title .muted { font-size: .82rem; }
     details.panel { margin-top: 24px; }
-    details.panel > summary { cursor: pointer; font-weight: 700; list-style-position: outside; }
-    details.panel > summary h2 { display: inline; margin-left: 4px; }
-    .device-meta { display: grid; gap: 3px; margin-top: 8px; }
-    pre { margin: 10px 0 0; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .82rem; }
+    details.panel > summary { cursor: pointer; list-style-position: outside; }
+    details.panel > summary .section-title { display: inline-flex; width: calc(100% - 22px); margin: 0 0 10px 4px; vertical-align: middle; }
+    .row { padding: 12px 14px; }
+    .row-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .row-title { min-width: 0; }
+    .row-title strong { overflow-wrap: anywhere; }
+    .meta-line { margin-top: 3px; }
+    .device-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 6px 14px; margin-top: 10px; }
+    .kv { min-width: 0; }
+    .kv span { display: block; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
+    .kv strong { display: block; font-size: .9rem; overflow-wrap: anywhere; }
+    .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 8px; font-size: .78rem; font-weight: 650; white-space: nowrap; }
+    .pill.ok { color: var(--ok); background: var(--ok-soft); }
+    .pill.warn { color: var(--warn); background: var(--warn-soft); }
+    .pill.bad { color: var(--bad); background: var(--bad-soft); }
+    .pill.neutral { color: var(--accent); background: var(--accent-soft); }
+    .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+    .chip { border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; color: var(--muted); background: var(--panel-soft); font-size: .76rem; }
+    details.raw { margin-top: 10px; }
+    details.raw > summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
+    pre { margin: 8px 0 0; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .8rem; background: var(--panel-soft); border: 1px solid var(--border); border-radius: 6px; padding: 10px; }
     code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     button, input { font: inherit; }
-    input { min-width: 260px; padding: 8px; }
-    button { padding: 8px 12px; }
+    input { min-width: 260px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+    button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
     @media (prefers-color-scheme: dark) {
-      body { background: #171a1f; color: #e5e7eb; }
-      header, .stat, .row { background: #20242b; border-color: #343a45; }
-      .muted { color: #aab2c0; }
+      :root {
+        --bg: #171a1f;
+        --panel: #22262d;
+        --panel-soft: #191d23;
+        --text: #e7e9ed;
+        --muted: #aab2c0;
+        --border: #363d47;
+        --accent: #5eead4;
+        --accent-soft: #123b37;
+        --warn: #f4c766;
+        --warn-soft: #3c2d12;
+        --ok: #7dd3aa;
+        --ok-soft: #173528;
+        --bad: #ffb088;
+        --bad-soft: #3f2117;
+      }
+    }
+    @media (max-width: 680px) {
+      .header-inner { align-items: flex-start; flex-direction: column; }
+      .top-status { text-align: left; }
+      main { padding-inline: 14px; }
+      .row-head, .section-title { align-items: flex-start; flex-direction: column; }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>Dracon Relay</h1>
-    <div class="muted">Read-only public relay dashboard</div>
+    <div class="header-inner">
+      <div>
+        <h1>Dracon Relay</h1>
+        <div class="muted">Public relay and home sync status</div>
+      </div>
+      <div id="status" class="muted top-status">Loading...</div>
+    </div>
   </header>
   <main>
     <form id="auth" hidden>
       <input id="token" type="password" autocomplete="current-password" placeholder="Dashboard token">
       <button type="submit">Save</button>
     </form>
-    <div id="status" class="muted">Loading...</div>
     <section class="grid" id="summary"></section>
-    <h2>Remote Devices</h2>
+    <div class="section-title"><h2>Remote Devices</h2><span class="muted" id="remoteDeviceCount"></span></div>
     <section class="rows" id="devices"></section>
     <details class="panel" id="eventsPanel" open>
-      <summary><h2>Recent Relay Events</h2></summary>
+      <summary><div class="section-title"><h2>Recent Relay Events</h2><span class="muted" id="relayEventCount"></span></div></summary>
       <section class="rows" id="events"></section>
     </details>
-    <h2>Home Snapshot</h2>
+    <div class="section-title"><h2>Home Snapshot</h2><span class="muted" id="homeSnapshotAge"></span></div>
     <section class="rows" id="home"></section>
-    <h2>Home Devices</h2>
+    <div class="section-title"><h2>Home Devices</h2><span class="muted" id="homeDeviceCount"></span></div>
     <section class="rows" id="homeDevices"></section>
   </main>
   <script>
@@ -574,9 +638,41 @@ DASHBOARD_HTML = """<!doctype html>
       return new Date(value * 1000).toLocaleString();
     }
     function jsonBlock(value) {
+      const details = el("details", "raw");
+      details.append(el("summary", "", "Full readout"));
       const block = el("pre", "");
       block.textContent = JSON.stringify(value, null, 2);
-      return block;
+      details.append(block);
+      return details;
+    }
+    function pill(text, kind) {
+      return el("span", `pill ${kind || "neutral"}`, text);
+    }
+    function kv(label, value) {
+      const node = el("div", "kv");
+      node.append(el("span", "", label));
+      node.append(el("strong", "", value === undefined || value === null || value === "" ? "-" : String(value)));
+      return node;
+    }
+    function statusPill(online, detail) {
+      if (online) return pill(detail || "online", "ok");
+      if (detail) return pill(detail, "warn");
+      return pill("offline", "bad");
+    }
+    function capabilityChips(capabilities) {
+      const wrap = el("div", "chips");
+      if (!Array.isArray(capabilities) || !capabilities.length) return wrap;
+      for (const capability of capabilities) wrap.append(el("span", "chip", capability));
+      return wrap;
+    }
+    function formatUptime(seconds) {
+      const value = Number(seconds || 0);
+      const days = Math.floor(value / 86400);
+      const hours = Math.floor((value % 86400) / 3600);
+      const minutes = Math.floor((value % 3600) / 60);
+      if (days) return `${days}d ${hours}h`;
+      if (hours) return `${hours}h ${minutes}m`;
+      return `${minutes}m`;
     }
     function authHeaders() {
       const saved = localStorage.getItem(tokenKey) || "";
@@ -596,7 +692,7 @@ DASHBOARD_HTML = """<!doctype html>
         ["Remote devices", data.relay.device_count],
         ["Pending events", data.relay.pending_event_count],
         ["Acked events", data.relay.acked_event_count],
-        ["Uptime seconds", data.relay.uptime_seconds],
+        ["Relay uptime", formatUptime(data.relay.uptime_seconds)],
       ]) {
         const stat = el("div", "stat");
         stat.append(el("span", "muted", label));
@@ -606,35 +702,72 @@ DASHBOARD_HTML = """<!doctype html>
 
       const devices = document.getElementById("devices");
       clear(devices);
+      document.getElementById("remoteDeviceCount").textContent = `${data.devices.length} registered`;
       if (!data.devices.length) devices.append(el("div", "row muted", "No remote devices registered."));
       for (const device of data.devices) {
         const row = el("div", "row");
-        row.append(el("strong", "", device.id));
-        row.append(el("div", "muted", `${device.type || "unknown"} ${device.model || ""}`.trim()));
-        row.append(el("div", "muted", `Last seen ${timeText(device.last_seen)}`));
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", device.id));
+        title.append(el("div", "muted meta-line", `${device.type || "unknown"} ${device.model || ""}`.trim()));
+        head.append(title);
+        head.append(pill("remote", "neutral"));
+        row.append(head);
+        const meta = el("div", "device-meta");
+        meta.append(kv("Last seen", timeText(device.last_seen)));
+        meta.append(kv("First seen", timeText(device.first_seen)));
+        meta.append(kv("Remote address", device.remote_addr));
+        row.append(meta);
         devices.append(row);
       }
 
       const events = document.getElementById("events");
       clear(events);
+      document.getElementById("relayEventCount").textContent = `${data.recent_events.length} shown`;
       if (!data.recent_events.length) events.append(el("div", "row muted", "No relay events recorded."));
       for (const event of data.recent_events.slice().reverse()) {
         const row = el("div", "row");
-        row.append(el("strong", "", `${event.event_type} from ${event.device_id}`));
-        row.append(el("div", "muted", `${timeText(event.received_at)} · attempts ${event.attempts} · ${event.acked_at ? "acked" : "pending"}`));
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", `${event.event_type} from ${event.device_id}`));
+        title.append(el("div", "muted meta-line", timeText(event.received_at)));
+        head.append(title);
+        head.append(pill(event.acked_at ? "acked" : "pending", event.acked_at ? "ok" : "warn"));
+        row.append(head);
+        const meta = el("div", "device-meta");
+        meta.append(kv("Attempts", event.attempts));
+        meta.append(kv("Delivered", timeText(event.delivered_at)));
+        meta.append(kv("Acked", timeText(event.acked_at)));
+        row.append(meta);
+        row.append(jsonBlock(event.payload || {}));
         events.append(row);
       }
 
       const home = document.getElementById("home");
       clear(home);
       if (!data.home) {
+        document.getElementById("homeSnapshotAge").textContent = "";
         home.append(el("div", "row muted", "No home server snapshot received."));
       } else {
         const payload = data.home.payload || {};
         const row = el("div", "row");
-        row.append(el("strong", "", `Snapshot ${timeText(data.home.received_at)}`));
+        document.getElementById("homeSnapshotAge").textContent = `received ${timeText(data.home.received_at)}`;
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", "Latest home sync"));
+        title.append(el("div", "muted meta-line", `Snapshot ${timeText(data.home.received_at)}`));
+        head.append(title);
+        head.append(pill("synced", "ok"));
+        row.append(head);
         const summary = payload.summary || {};
-        row.append(el("div", "muted", `Devices ${summary.device_count ?? "?"}, online ${summary.online_count ?? "?"}, recent buttons ${summary.recent_button_event_count ?? "?"}`));
+        const meta = el("div", "device-meta");
+        meta.append(kv("Devices", summary.device_count ?? "?"));
+        meta.append(kv("Online", summary.online_count ?? "?"));
+        meta.append(kv("Offline", summary.offline_count ?? "?"));
+        meta.append(kv("Recent buttons", summary.recent_button_event_count ?? "?"));
+        meta.append(kv("Rules", summary.rule_count ?? "?"));
+        meta.append(kv("Active timers", summary.active_timer_count ?? "?"));
+        row.append(meta);
         home.append(row);
       }
 
@@ -642,6 +775,7 @@ DASHBOARD_HTML = """<!doctype html>
       clear(homeDevices);
       const homePayload = data.home?.payload || {};
       const devicesFromHome = Array.isArray(homePayload.devices) ? homePayload.devices : [];
+      document.getElementById("homeDeviceCount").textContent = `${devicesFromHome.length} in snapshot`;
       if (!devicesFromHome.length) {
         homeDevices.append(el("div", "row muted", "No home devices in the latest snapshot."));
       }
@@ -649,9 +783,13 @@ DASHBOARD_HTML = """<!doctype html>
         const row = el("details", "row");
         row.open = false;
         const summaryNode = el("summary", "");
+        summaryNode.className = "row-head";
+        const title = el("div", "row-title");
         const name = device.display_name || device.friendly_name || device.id || "unknown device";
-        summaryNode.append(el("strong", "", name));
-        summaryNode.append(el("span", "muted", ` ${device.online ? "online" : "offline"}${device.online_detail ? `, ${device.online_detail}` : ""}`));
+        title.append(el("strong", "", name));
+        title.append(el("div", "muted meta-line", `${device.type || "unknown"}${device.model ? ` · ${device.model}` : ""}`));
+        summaryNode.append(title);
+        summaryNode.append(statusPill(device.online, device.online_detail));
         row.append(summaryNode);
         const meta = el("div", "device-meta");
         for (const [label, value] of [
@@ -667,10 +805,11 @@ DASHBOARD_HTML = """<!doctype html>
           ["Capabilities", Array.isArray(device.capabilities) ? device.capabilities.join(", ") : ""],
         ]) {
           if (value !== undefined && value !== null && value !== "") {
-            meta.append(el("div", "muted", `${label}: ${value}`));
+            meta.append(kv(label, value));
           }
         }
         row.append(meta);
+        row.append(capabilityChips(device.capabilities));
         row.append(jsonBlock(device));
         homeDevices.append(row);
       }
