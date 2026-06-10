@@ -18,4 +18,13 @@ config NESSO_N1_SERVER_URL
     help
         Base URL for the local command server, without a trailing slash.
 
+config NESSO_N1_RELAY_ENROLL_TOKEN
+    string "Relay device enrollment token"
+    default ""
+    help
+        Optional bearer token used to enroll this device with the public relay.
+        Leave empty when talking directly to the local command server. When set,
+        the device stores the generated device secret in NVS and uses it for
+        future relay registration and button requests.
+
 endmenu

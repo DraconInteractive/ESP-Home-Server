@@ -152,3 +152,27 @@ relay-state.sqlite3
 
 The database contains remote devices, queued events, ack status, and the latest
 home dashboard snapshot.
+
+## Updating The VPS From Git
+
+Keep `/opt/spoken-command-relay` as the runtime directory. It contains
+`.env.local`, `relay-state.sqlite3`, and `device-tokens.json`, so do not replace
+it with a fresh checkout.
+
+Clone this repo somewhere separate on the VPS, for example:
+
+```sh
+git clone https://github.com/DraconInteractive/ESP-Home-Server.git ~/ESP-Home-Server
+```
+
+After changes are pushed to GitHub, update the relay with:
+
+```sh
+cd ~/ESP-Home-Server
+sudo ./relay/update-relay-from-git.sh main
+```
+
+The updater fetches `origin` as the SSH user that invoked `sudo`, fast-forwards
+the checkout, copies the relay app files into `/opt/spoken-command-relay`,
+compiles `server.py`, restarts `spoken-command-relay`, and checks the local
+health endpoint.

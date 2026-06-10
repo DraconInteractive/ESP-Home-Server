@@ -8,6 +8,7 @@
 #include "driver/i2c.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
+#include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
@@ -23,12 +24,13 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "hal/spi_types.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "nesso_n1";
 #define FIRMWARE_PROJECT "nesso-n1-firmware"
-#define FIRMWARE_VERSION "0.0.1d"
+#define FIRMWARE_VERSION "0.0.2d"
 #define FIRMWARE_DEVICE_TYPE "arduino-nesso-n1"
 
 #define LCD_HOST SPI2_HOST
@@ -95,6 +97,9 @@ static const char *TAG = "nesso_n1";
 #define HTTP_RESPONSE_MAX 1024
 #define DISPLAY_TEXT_MAX 192
 #define LCD_BLOCK_LINES 24
+#define RELAY_SECRET_MAX 96
+#define RELAY_NVS_NAMESPACE "relay"
+#define RELAY_NVS_SECRET_KEY "device_secret"
 
 typedef struct {
     char data[HTTP_RESPONSE_MAX];
@@ -109,12 +114,17 @@ static bool s_wifi_ready;
 static char s_device_id[48] = "arduino-nesso-n1-unknown";
 static char s_ip_addr[16] = "0.0.0.0";
 static char s_display_text[DISPLAY_TEXT_MAX] = "Display ready.";
+static char s_relay_device_secret[RELAY_SECRET_MAX] = "";
+static char s_register_body[1200];
+static http_response_t s_register_response;
 static int s_battery_pct = -1;
 static int s_battery_mv = -1;
 static uint32_t s_key1_count;
 static uint32_t s_key2_count;
 static uint16_t s_line_buffer[LCD_H_RES];
 static uint16_t s_block_buffer[LCD_H_RES * LCD_BLOCK_LINES];
+
+static bool extract_json_string(const char *json, const char *key, char *out, size_t out_size);
 
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -556,7 +566,72 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static esp_err_t post_json(const char *path, const char *body, int *status_out)
+static bool relay_enabled(void)
+{
+    return strlen(CONFIG_NESSO_N1_RELAY_ENROLL_TOKEN) > 0;
+}
+
+static const char *relay_auth_token_for_register(void)
+{
+    return strlen(s_relay_device_secret) > 0 ? s_relay_device_secret : CONFIG_NESSO_N1_RELAY_ENROLL_TOKEN;
+}
+
+static const char *relay_auth_token_for_device_request(void)
+{
+    return strlen(s_relay_device_secret) > 0 ? s_relay_device_secret : "";
+}
+
+static void relay_load_device_secret(void)
+{
+    if (!relay_enabled()) {
+        return;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(RELAY_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGI(TAG, "No relay device secret stored yet");
+        return;
+    }
+
+    size_t len = sizeof(s_relay_device_secret);
+    ret = nvs_get_str(handle, RELAY_NVS_SECRET_KEY, s_relay_device_secret, &len);
+    nvs_close(handle);
+    if (ret == ESP_OK && s_relay_device_secret[0]) {
+        ESP_LOGI(TAG, "Loaded relay device secret from NVS");
+    } else {
+        s_relay_device_secret[0] = '\0';
+        ESP_LOGI(TAG, "No relay device secret stored yet");
+    }
+}
+
+static void relay_save_device_secret(const char *secret)
+{
+    if (!relay_enabled() || secret == NULL || secret[0] == '\0') {
+        return;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(RELAY_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Open relay NVS failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    ret = nvs_set_str(handle, RELAY_NVS_SECRET_KEY, secret);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (ret == ESP_OK) {
+        strlcpy(s_relay_device_secret, secret, sizeof(s_relay_device_secret));
+        ESP_LOGI(TAG, "Stored relay device secret");
+    } else {
+        ESP_LOGW(TAG, "Store relay device secret failed: %s", esp_err_to_name(ret));
+    }
+}
+
+static esp_err_t post_json_auth(const char *path, const char *body, const char *auth_token,
+                                int *status_out, http_response_t *response)
 {
     char url[240] = {0};
     snprintf(url, sizeof(url), "%s%s", CONFIG_NESSO_N1_SERVER_URL, path);
@@ -565,12 +640,20 @@ static esp_err_t post_json(const char *path, const char *body, int *status_out)
         .url = url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 2500,
+        .event_handler = response ? http_event_handler : NULL,
+        .user_data = response,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     ESP_RETURN_ON_FALSE(client != NULL, ESP_ERR_NO_MEM, TAG, "create HTTP client");
 
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_header(client, "X-Device-Id", s_device_id);
+    if (auth_token != NULL && auth_token[0] != '\0') {
+        char auth_header[128] = {0};
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s", auth_token);
+        esp_http_client_set_header(client, "Authorization", auth_header);
+    }
     esp_http_client_set_post_field(client, body, strlen(body));
     esp_err_t ret = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
@@ -580,6 +663,11 @@ static esp_err_t post_json(const char *path, const char *body, int *status_out)
         *status_out = status;
     }
     return ret;
+}
+
+static esp_err_t post_json(const char *path, const char *body, int *status_out)
+{
+    return post_json_auth(path, body, relay_auth_token_for_device_request(), status_out, NULL);
 }
 
 static void send_button_event(const char *button, const char *event, uint32_t count)
@@ -654,10 +742,9 @@ static void register_with_server(void)
     }
 
     char path[96] = {0};
-    char body[1200] = {0};
     int status = 0;
     snprintf(path, sizeof(path), "/devices/%s/register", s_device_id);
-    snprintf(body, sizeof(body),
+    snprintf(s_register_body, sizeof(s_register_body),
              "{"
              "\"type\":\"display\","
              "\"device_type\":\"" FIRMWARE_DEVICE_TYPE "\","
@@ -691,9 +778,14 @@ static void register_with_server(void)
              s_battery_pct,
              s_battery_mv);
 
-    esp_err_t ret = post_json(path, body, &status);
+    memset(&s_register_response, 0, sizeof(s_register_response));
+    esp_err_t ret = post_json_auth(path, s_register_body, relay_auth_token_for_register(), &status, &s_register_response);
     if (ret == ESP_OK && status >= 200 && status < 300) {
-        ESP_LOGI(TAG, "Registered with command server");
+        char device_secret[RELAY_SECRET_MAX] = {0};
+        if (relay_enabled() && extract_json_string(s_register_response.data, "device_secret", device_secret, sizeof(device_secret))) {
+            relay_save_device_secret(device_secret);
+        }
+        ESP_LOGI(TAG, "Registered with command server%s", relay_enabled() ? " via relay" : "");
     } else {
         ESP_LOGW(TAG, "Registration failed: err=%s status=%d", esp_err_to_name(ret), status);
     }
@@ -722,6 +814,9 @@ static bool extract_json_string(const char *json, const char *key, char *out, si
 static void poll_events(void)
 {
     if (!s_wifi_ready || strlen(CONFIG_NESSO_N1_SERVER_URL) == 0) {
+        return;
+    }
+    if (relay_enabled()) {
         return;
     }
 
@@ -819,6 +914,7 @@ static void storage_init(void)
 void app_main(void)
 {
     storage_init();
+    relay_load_device_secret();
     init_device_id();
     i2c_init();
     charger_init();
