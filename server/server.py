@@ -1860,6 +1860,30 @@ def process_relay_event(event: dict[str, Any]) -> None:
     raise ValueError(f"unsupported relay event type: {event_type}")
 
 
+def process_relay_device_statuses(devices: list[Any]) -> int:
+    processed = 0
+    for raw_device in devices:
+        if not isinstance(raw_device, dict):
+            continue
+        device_id = clean_device_id(str(raw_device.get("id", "")))
+        if not device_id:
+            continue
+        payload = raw_device.get("status") if isinstance(raw_device.get("status"), dict) else {}
+        update_device_status(device_id, {"status": payload}, source="relay")
+        device = DEVICES.get(device_id, {})
+        if isinstance(raw_device.get("last_seen"), (int, float)):
+            device["last_seen"] = int(raw_device["last_seen"])
+            device["last_relay_seen"] = int(raw_device["last_seen"])
+        if raw_device.get("remote_addr"):
+            device["remote_addr"] = str(raw_device.get("remote_addr", ""))[:120]
+        if raw_device.get("user_agent"):
+            device["user_agent"] = str(raw_device.get("user_agent", ""))[:240]
+        processed += 1
+    if processed:
+        save_device_registry()
+    return processed
+
+
 def relay_sync_worker() -> None:
     if not RELAY_ENABLED:
         return
@@ -1876,6 +1900,12 @@ def relay_sync_worker() -> None:
                     snapshot = external_dashboard_snapshot()
                 relay_request_json("/sync/dashboard-snapshot", method="POST", payload=snapshot)
                 next_snapshot_at = now + RELAY_SNAPSHOT_SECONDS
+
+            status_payload = relay_request_json("/sync/device-statuses")
+            status_devices = status_payload.get("devices", [])
+            if isinstance(status_devices, list):
+                with STATE_LOCK:
+                    process_relay_device_statuses(status_devices)
 
             payload = relay_request_json("/sync/events")
             events = payload.get("events", [])

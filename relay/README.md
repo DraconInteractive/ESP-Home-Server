@@ -97,6 +97,7 @@ Home server sync:
 
 ```text
 POST /sync/dashboard-snapshot
+GET  /sync/device-statuses
 GET  /sync/events
 POST /sync/events/{event_id}/ack
 ```
@@ -140,6 +141,13 @@ Poll pending events from the home server:
 
 ```sh
 curl https://relay.dracon.au/sync/events \
+  -H 'Authorization: Bearer replace-with-home-server-sync-token'
+```
+
+Poll latest status updates from remote devices:
+
+```sh
+curl https://relay.dracon.au/sync/device-statuses \
   -H 'Authorization: Bearer replace-with-home-server-sync-token'
 ```
 

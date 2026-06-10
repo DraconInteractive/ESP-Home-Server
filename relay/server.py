@@ -72,9 +72,16 @@ def init_database() -> None:
                 remote_addr TEXT,
                 user_agent TEXT,
                 payload_json TEXT NOT NULL DEFAULT '{}',
-                status_json TEXT NOT NULL DEFAULT '{}'
+                status_json TEXT NOT NULL DEFAULT '{}',
+                status_dirty INTEGER NOT NULL DEFAULT 0
             )
         """)
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(devices)").fetchall()
+        }
+        if "status_dirty" not in columns:
+            connection.execute("ALTER TABLE devices ADD COLUMN status_dirty INTEGER NOT NULL DEFAULT 0")
         connection.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
@@ -298,7 +305,12 @@ def row_event(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def upsert_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+def upsert_device(
+    device_id: str,
+    payload: dict[str, Any],
+    handler: BaseHTTPRequestHandler,
+    mark_status_dirty: bool = False,
+) -> dict[str, Any]:
     now = int(time.time())
     with db_connect() as connection:
         existing = connection.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,)).fetchone()
@@ -330,15 +342,19 @@ def upsert_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequ
             """
             INSERT INTO devices (
                 device_id, first_seen, last_seen, remote_addr, user_agent,
-                payload_json, status_json
+                payload_json, status_json, status_dirty
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
                 last_seen = excluded.last_seen,
                 remote_addr = excluded.remote_addr,
                 user_agent = excluded.user_agent,
                 payload_json = excluded.payload_json,
-                status_json = excluded.status_json
+                status_json = excluded.status_json,
+                status_dirty = CASE
+                    WHEN excluded.status_dirty = 1 THEN 1
+                    ELSE devices.status_dirty
+                END
             """,
             (
                 device_id,
@@ -348,10 +364,38 @@ def upsert_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequ
                 handler.headers.get("User-Agent", ""),
                 json.dumps(merged_payload, separators=(",", ":")),
                 json.dumps(merged_status, separators=(",", ":")),
+                1 if mark_status_dirty else 0,
             ),
         )
         row = connection.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,)).fetchone()
     return public_device(row)
+
+
+def dirty_device_statuses(limit: int = 100) -> list[dict[str, Any]]:
+    with db_connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM devices WHERE status_dirty = 1 ORDER BY last_seen ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        device_ids = [row["device_id"] for row in rows]
+        if device_ids:
+            placeholders = ",".join("?" for _ in device_ids)
+            connection.execute(
+                f"UPDATE devices SET status_dirty = 0 WHERE device_id IN ({placeholders})",
+                device_ids,
+            )
+
+    devices: list[dict[str, Any]] = []
+    for row in rows:
+        device = public_device(row)
+        devices.append({
+            "id": device["id"],
+            "last_seen": device.get("last_seen"),
+            "remote_addr": device.get("remote_addr", ""),
+            "user_agent": device.get("user_agent", ""),
+            "status": device.get("status", {}),
+        })
+    return devices
 
 
 def enqueue_event(device_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -371,18 +415,6 @@ def enqueue_event(device_id: str, event_type: str, payload: dict[str, Any]) -> d
 
 def queue_register_event(device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return enqueue_event(device_id, "register", payload)
-
-
-def queue_status_event(device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    status = payload.get("status") if isinstance(payload.get("status"), dict) else payload
-    if not isinstance(status, dict):
-        status = {}
-    clean_status = {
-        str(key)[:40]: value
-        for key, value in status.items()
-        if isinstance(value, (str, int, float, bool)) or value is None
-    }
-    return enqueue_event(device_id, "status", {"status": clean_status})
 
 
 def queue_button_event(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -898,6 +930,20 @@ class RelayHandler(BaseHTTPRequestHandler):
             json_response(self, 200, {"ok": True, "events": events})
             return
 
+        if parsed.path == "/sync/device-statuses":
+            auth = require_static_token(self, SYNC_TOKEN, "sync")
+            if not auth.ok:
+                auth_error(self, auth)
+                return
+            try:
+                limit = max(1, min(int(query.get("limit", ["100"])[0]), 500))
+            except ValueError:
+                limit = 100
+            with STATE_LOCK:
+                devices = dirty_device_statuses(limit)
+            json_response(self, 200, {"ok": True, "devices": devices, "server_time": int(time.time())})
+            return
+
         if parsed.path in ("/admin/devices", "/admin/events"):
             auth = require_static_token(self, ADMIN_TOKEN, "admin")
             if not auth.ok:
@@ -962,9 +1008,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             try:
                 payload = read_json_body(self)
                 with STATE_LOCK:
-                    device = upsert_device(device_id, payload, self)
-                    event = queue_status_event(device_id, payload)
-                json_response(self, 200, {"ok": True, "device": device, "relay_event": event})
+                    device = upsert_device(device_id, payload, self, mark_status_dirty=True)
+                json_response(self, 200, {"ok": True, "device": device})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
