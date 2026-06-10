@@ -3577,6 +3577,13 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
         </div>
         <div class="panel-stack">
+          <div class="panel collapsible-panel" data-panel-id="startup">
+            <div class="panel-header">
+              <h2>Startup</h2>
+              <button class="collapse-button" type="button" aria-label="Toggle Startup" aria-expanded="true">-</button>
+            </div>
+            <div class="diagnostics collapsible-content" id="diagnostics"></div>
+          </div>
           <div class="panel">
             <h2>Timers</h2>
             <div class="events">
@@ -3599,13 +3606,6 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
             </div>
             <div class="events" id="timers"></div>
-          </div>
-          <div class="panel collapsible-panel" data-panel-id="startup">
-            <div class="panel-header">
-              <h2>Startup</h2>
-              <button class="collapse-button" type="button" aria-label="Toggle Startup" aria-expanded="true">-</button>
-            </div>
-            <div class="diagnostics collapsible-content" id="diagnostics"></div>
           </div>
         </div>
       </section>
