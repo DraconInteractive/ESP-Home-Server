@@ -65,6 +65,30 @@ export COMMAND_SERVER_NTFY_TOPIC="your-topic"
 export COMMAND_SERVER_NTFY_TITLE="Spoken Command"
 ```
 
+## Public Relay Sync
+
+The local server can sync with the public relay using outbound HTTPS only. Enable
+it in `.env.local`:
+
+```sh
+export COMMAND_SERVER_RELAY_ENABLED="1"
+export COMMAND_SERVER_RELAY_URL="https://relay.dracon.au"
+export COMMAND_SERVER_RELAY_SYNC_TOKEN="same-token-as-RELAY_SYNC_TOKEN"
+export COMMAND_SERVER_RELAY_POLL_SECONDS="5"
+export COMMAND_SERVER_RELAY_SNAPSHOT_SECONDS="30"
+```
+
+When enabled, the local server:
+
+- pushes a reduced read-only dashboard snapshot to `/sync/dashboard-snapshot`
+- polls `/sync/events` for pending remote device events
+- converts remote `register` events into local device registrations
+- converts remote `button` events into the existing local event-rule flow
+- acks each relay event after processing
+
+The pushed dashboard snapshot deliberately omits local action controls, command
+simulation, firmware upload paths, and media proxy endpoints.
+
 ## Endpoints
 
 - `GET /` or `GET /dashboard` opens the local device dashboard.

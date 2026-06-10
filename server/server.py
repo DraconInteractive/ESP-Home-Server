@@ -40,6 +40,12 @@ LOW_BATTERY_THRESHOLD_PERCENT = float(os.environ.get("COMMAND_SERVER_LOW_BATTERY
 MEDIA_SNAPSHOT_TTL_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_SNAPSHOT_TTL_SECONDS", "1.0"))
 MEDIA_STREAM_IDLE_SECONDS = float(os.environ.get("COMMAND_SERVER_MEDIA_STREAM_IDLE_SECONDS", "3.0"))
 MEDIA_STREAM_CHUNK_SIZE = int(os.environ.get("COMMAND_SERVER_MEDIA_STREAM_CHUNK_SIZE", "4096"))
+RELAY_ENABLED = os.environ.get("COMMAND_SERVER_RELAY_ENABLED", "0") == "1"
+RELAY_URL = os.environ.get("COMMAND_SERVER_RELAY_URL", "").rstrip("/")
+RELAY_SYNC_TOKEN = os.environ.get("COMMAND_SERVER_RELAY_SYNC_TOKEN", "")
+RELAY_POLL_SECONDS = max(2.0, float(os.environ.get("COMMAND_SERVER_RELAY_POLL_SECONDS", "5.0")))
+RELAY_SNAPSHOT_SECONDS = max(10.0, float(os.environ.get("COMMAND_SERVER_RELAY_SNAPSHOT_SECONDS", "30.0")))
+RELAY_TIMEOUT_SECONDS = max(2.0, float(os.environ.get("COMMAND_SERVER_RELAY_TIMEOUT_SECONDS", "10.0")))
 DEVICE_NAMES_PATH = os.environ.get(
     "COMMAND_SERVER_DEVICE_NAMES_PATH",
     os.path.join(os.path.dirname(__file__), "device-names.json"),
@@ -1717,6 +1723,149 @@ def dashboard_snapshot() -> dict[str, Any]:
         "recent_commands": RECENT_COMMANDS[-20:],
         "recent_button_events": RECENT_BUTTON_EVENTS[-20:],
     }
+
+
+def external_dashboard_snapshot() -> dict[str, Any]:
+    snapshot = dashboard_snapshot()
+    external = {
+        "server": {
+            "started_at": snapshot["server"].get("started_at"),
+            "uptime_seconds": snapshot["server"].get("uptime_seconds"),
+            "device_stale_seconds": snapshot["server"].get("device_stale_seconds"),
+        },
+        "summary": snapshot.get("summary", {}),
+        "devices": [],
+        "recent_button_events": snapshot.get("recent_button_events", []),
+        "recent_rule_runs": snapshot.get("recent_rule_runs", []),
+    }
+
+    for raw_device in snapshot.get("devices", []):
+        if not isinstance(raw_device, dict):
+            continue
+        device = {
+            key: raw_device.get(key)
+            for key in (
+                "id",
+                "display_name",
+                "friendly_name",
+                "type",
+                "model",
+                "device_type",
+                "firmware",
+                "firmware_version",
+                "firmware_project",
+                "capabilities",
+                "status",
+                "first_seen",
+                "last_seen",
+                "online",
+                "online_detail",
+                "age_seconds",
+                "pending_events",
+            )
+            if key in raw_device
+        }
+        external["devices"].append(device)
+
+    return external
+
+
+def relay_request_json(path: str, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not RELAY_URL:
+        raise RuntimeError("COMMAND_SERVER_RELAY_URL is not configured")
+    if not RELAY_SYNC_TOKEN:
+        raise RuntimeError("COMMAND_SERVER_RELAY_SYNC_TOKEN is not configured")
+
+    body = None
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {RELAY_SYNC_TOKEN}",
+        "User-Agent": "SpokenCommandServer/0.1",
+    }
+    if payload is not None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(f"{RELAY_URL}{path}", data=body, headers=headers, method=method)
+    with urlopen(request, timeout=RELAY_TIMEOUT_SECONDS) as response:
+        data = response.read()
+    if not data:
+        return {}
+    parsed = json.loads(data.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError("relay response must be a JSON object")
+    return parsed
+
+
+def relay_ack_event(event_id: str, ok: bool, error: str = "") -> None:
+    relay_request_json(
+        f"/sync/events/{event_id}/ack",
+        method="POST",
+        payload={"ok": ok, "error": error[:240]},
+    )
+
+
+def process_relay_event(event: dict[str, Any]) -> None:
+    event_id = clean_rule_id(str(event.get("id", "")))
+    event_type = clean_rule_type(str(event.get("event_type", "")))
+    device_id = clean_device_id(str(event.get("device_id", "")))
+    payload = event.get("payload")
+    if not event_id:
+        raise ValueError("relay event id is required")
+    if not device_id:
+        raise ValueError("relay event device_id is required")
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if event_type == "register":
+        register_device(device_id, payload)
+        return
+    if event_type == "button":
+        record_button_event(device_id, payload)
+        return
+    raise ValueError(f"unsupported relay event type: {event_type}")
+
+
+def relay_sync_worker() -> None:
+    if not RELAY_ENABLED:
+        return
+    if not RELAY_URL or not RELAY_SYNC_TOKEN:
+        print("Relay sync disabled: COMMAND_SERVER_RELAY_URL or COMMAND_SERVER_RELAY_SYNC_TOKEN is missing.")
+        return
+
+    next_snapshot_at = 0.0
+    while True:
+        now = time.monotonic()
+        try:
+            if now >= next_snapshot_at:
+                with STATE_LOCK:
+                    snapshot = external_dashboard_snapshot()
+                relay_request_json("/sync/dashboard-snapshot", method="POST", payload=snapshot)
+                next_snapshot_at = now + RELAY_SNAPSHOT_SECONDS
+
+            payload = relay_request_json("/sync/events")
+            events = payload.get("events", [])
+            if not isinstance(events, list):
+                events = []
+            for raw_event in events:
+                if not isinstance(raw_event, dict):
+                    continue
+                event_id = clean_rule_id(str(raw_event.get("id", "")))
+                try:
+                    with STATE_LOCK:
+                        process_relay_event(raw_event)
+                    if event_id:
+                        relay_ack_event(event_id, True)
+                except Exception as exc:
+                    print(f"Relay event failed: id={event_id} error={exc}")
+                    if event_id:
+                        try:
+                            relay_ack_event(event_id, False, str(exc))
+                        except Exception as ack_exc:
+                            print(f"Relay event ack failed: id={event_id} error={ack_exc}")
+        except Exception as exc:
+            print(f"Relay sync failed: {exc}")
+
+        time.sleep(RELAY_POLL_SECONDS)
 
 
 def media_endpoint_url(device_id: str, endpoint_name: str) -> str | None:
@@ -5502,6 +5651,8 @@ def main() -> None:
     load_uptime_monitors()
     threading.Thread(target=timer_worker, name="timer-worker", daemon=True).start()
     threading.Thread(target=uptime_worker, name="uptime-worker", daemon=True).start()
+    if RELAY_ENABLED:
+        threading.Thread(target=relay_sync_worker, name="relay-sync-worker", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), CommandHandler)
     print(f"Listening on http://{HOST}:{PORT}")
     print("POST audio to /audio/command with ELEVENLABS_API_KEY set in the environment.")

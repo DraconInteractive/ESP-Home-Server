@@ -231,3 +231,14 @@ Initial local-server change:
 - convert remote relay events into the existing local event-rule flow
 
 The first remote-device test target should be one of the XIAO button devices.
+
+## Implemented Notes
+
+- The relay app lives in `relay/`.
+- The relay is deployed behind Caddy at `https://relay.dracon.au`.
+- Remote device registration uses a one-time enrollment token to generate and
+  persist a per-device secret.
+- The local server relay worker is controlled by `COMMAND_SERVER_RELAY_ENABLED`,
+  `COMMAND_SERVER_RELAY_URL`, and `COMMAND_SERVER_RELAY_SYNC_TOKEN`.
+- The local server pushes a reduced dashboard snapshot and polls/acks remote
+  `register` and `button` events.
