@@ -56,6 +56,10 @@ TIMER_STATE_PATH = os.environ.get(
     "COMMAND_SERVER_TIMER_STATE_PATH",
     os.path.join(os.path.dirname(__file__), "timers.json"),
 )
+UPTIME_MONITORS_PATH = os.environ.get(
+    "COMMAND_SERVER_UPTIME_MONITORS_PATH",
+    os.path.join(os.path.dirname(__file__), "uptime-monitors.json"),
+)
 DATABASE_PATH = os.environ.get(
     "COMMAND_SERVER_DATABASE_PATH",
     os.path.join(os.path.dirname(__file__), "server-state.sqlite3"),
@@ -84,6 +88,7 @@ RECENT_COMMANDS: list[dict[str, Any]] = []
 RECENT_BUTTON_EVENTS: list[dict[str, Any]] = []
 RECENT_RULE_RUNS: list[dict[str, Any]] = []
 ACTIVE_TIMERS: dict[str, dict[str, Any]] = {}
+UPTIME_MONITORS: dict[str, dict[str, Any]] = {}
 LOW_BATTERY_NOTIFIED: set[str] = set()
 MUTED_DEVICES: dict[str, bool] = {}
 GLOBAL_MUTED = False
@@ -1479,6 +1484,193 @@ def dashboard_device(device_id: str) -> dict[str, Any]:
     return public
 
 
+def clean_monitor_target(target: str) -> str:
+    value = target.strip()[:240]
+    if not value:
+        raise ValueError("target is required")
+    if value.startswith(("http://", "https://")):
+        parsed = urlparse(value)
+        if not parsed.netloc:
+            raise ValueError("URL target must include a host")
+        return value
+    if re.search(r"\s", value):
+        raise ValueError("host target cannot contain spaces")
+    return value
+
+
+def public_uptime_monitor(monitor: dict[str, Any]) -> dict[str, Any]:
+    now = int(time.time())
+    result = dict(monitor)
+    result["due"] = bool(result.get("enabled", True)) and int(result.get("next_check_at", 0) or 0) <= now
+    return result
+
+
+def save_uptime_monitors() -> None:
+    directory = os.path.dirname(UPTIME_MONITORS_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = {"monitors": [UPTIME_MONITORS[monitor_id] for monitor_id in sorted(UPTIME_MONITORS)]}
+    temp_path = f"{UPTIME_MONITORS_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, UPTIME_MONITORS_PATH)
+
+
+def load_uptime_monitors() -> None:
+    try:
+        with open(UPTIME_MONITORS_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load uptime monitors: {exc}")
+        return
+
+    now = int(time.time())
+    for raw in payload.get("monitors", []) if isinstance(payload, dict) else []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            monitor_id = clean_rule_id(str(raw.get("id", "")) or uuid.uuid4().hex)
+            target = clean_monitor_target(str(raw.get("target", "")))
+            interval = max(30, int(raw.get("interval_seconds", 600) or 600))
+        except Exception:
+            continue
+        UPTIME_MONITORS[monitor_id] = {
+            "id": monitor_id,
+            "name": clean_friendly_name(str(raw.get("name", ""))) or target,
+            "target": target,
+            "interval_seconds": interval,
+            "enabled": bool(raw.get("enabled", True)),
+            "created_at": int(raw.get("created_at", now) or now),
+            "last_checked_at": int(raw.get("last_checked_at", 0) or 0),
+            "next_check_at": min(int(raw.get("next_check_at", now) or now), now),
+            "online": bool(raw.get("online", False)),
+            "detail": str(raw.get("detail", "not checked"))[:240],
+            "latency_ms": raw.get("latency_ms"),
+            "status_code": raw.get("status_code"),
+        }
+
+
+def upsert_uptime_monitor(payload: dict[str, Any]) -> dict[str, Any]:
+    now = int(time.time())
+    monitor_id = clean_rule_id(str(payload.get("id", "")) or uuid.uuid4().hex)
+    target = clean_monitor_target(str(payload.get("target", "")))
+    interval = max(30, int(payload.get("interval_seconds", 600) or 600))
+    existing = UPTIME_MONITORS.get(monitor_id, {})
+    monitor = {
+        "id": monitor_id,
+        "name": clean_friendly_name(str(payload.get("name", ""))) or str(existing.get("name", "")) or target,
+        "target": target,
+        "interval_seconds": interval,
+        "enabled": bool(payload.get("enabled", existing.get("enabled", True))),
+        "created_at": int(existing.get("created_at", now)),
+        "last_checked_at": int(existing.get("last_checked_at", 0) or 0),
+        "next_check_at": now,
+        "online": bool(existing.get("online", False)),
+        "detail": str(existing.get("detail", "not checked"))[:240],
+        "latency_ms": existing.get("latency_ms"),
+        "status_code": existing.get("status_code"),
+    }
+    UPTIME_MONITORS[monitor_id] = monitor
+    save_uptime_monitors()
+    return public_uptime_monitor(monitor)
+
+
+def check_uptime_monitor(monitor: dict[str, Any]) -> dict[str, Any]:
+    target = str(monitor.get("target", ""))
+    started = time.monotonic()
+    if target.startswith(("http://", "https://")):
+        try:
+            request = Request(target, method="GET", headers={"User-Agent": "SpokenCommandServer/0.1"})
+            with urlopen(request, timeout=5) as response:
+                latency_ms = int((time.monotonic() - started) * 1000)
+                return {
+                    "online": response.status < 500,
+                    "detail": f"http {response.status}",
+                    "latency_ms": latency_ms,
+                    "status_code": response.status,
+                }
+        except HTTPError as exc:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            return {
+                "online": exc.code < 500,
+                "detail": f"http {exc.code}",
+                "latency_ms": latency_ms,
+                "status_code": exc.code,
+            }
+        except Exception as exc:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            return {"online": False, "detail": str(exc)[:240], "latency_ms": latency_ms, "status_code": None}
+
+    ping_target = target
+    if target.endswith(".local"):
+        try:
+            resolved = subprocess.run(
+                ["avahi-resolve-host-name", "-4", target],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if resolved.returncode == 0:
+                parts = resolved.stdout.strip().split()
+                if len(parts) >= 2:
+                    ping_target = parts[1]
+            else:
+                detail = resolved.stderr.strip() or resolved.stdout.strip() or "mDNS resolution failed"
+                return {"online": False, "detail": detail[:240], "latency_ms": None, "status_code": None}
+        except FileNotFoundError:
+            return {"online": False, "detail": "avahi-resolve-host-name not installed", "latency_ms": None, "status_code": None}
+        except Exception as exc:
+            return {"online": False, "detail": f"mDNS resolution failed: {exc}"[:240], "latency_ms": None, "status_code": None}
+
+    try:
+        completed = subprocess.run(
+            ["ping", "-c", "1", "-W", "3", ping_target],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        latency_ms = None
+        match = re.search(r"time=([0-9.]+)\s*ms", completed.stdout)
+        if match:
+            latency_ms = int(float(match.group(1)))
+        detail = "ping ok" if completed.returncode == 0 else (completed.stderr.strip() or completed.stdout.strip() or "ping failed")
+        return {"online": completed.returncode == 0, "detail": detail[:240], "latency_ms": latency_ms, "status_code": None}
+    except Exception as exc:
+        return {"online": False, "detail": str(exc)[:240], "latency_ms": None, "status_code": None}
+
+
+def uptime_worker() -> None:
+    while True:
+        with STATE_LOCK:
+            now = int(time.time())
+            due = [
+                dict(monitor)
+                for monitor in UPTIME_MONITORS.values()
+                if monitor.get("enabled", True) and int(monitor.get("next_check_at", now) or now) <= now
+            ]
+
+        for monitor in due:
+            result = check_uptime_monitor(monitor)
+            with STATE_LOCK:
+                current = UPTIME_MONITORS.get(str(monitor.get("id", "")))
+                if not current:
+                    continue
+                now = int(time.time())
+                current.update(result)
+                current["last_checked_at"] = now
+                current["next_check_at"] = now + max(30, int(current.get("interval_seconds", 600) or 600))
+                save_uptime_monitors()
+
+        time.sleep(5)
+
+
 def dashboard_snapshot() -> dict[str, Any]:
     devices = [dashboard_device(device_id) for device_id in sorted(DEVICES)]
     online_count = sum(1 for device in devices if device.get("online"))
@@ -1519,6 +1711,7 @@ def dashboard_snapshot() -> dict[str, Any]:
         "actions": list_script_actions(),
         "rules": [public_rule(rule_id, EVENT_RULES[rule_id]) for rule_id in sorted(EVENT_RULES)],
         "recent_rule_runs": RECENT_RULE_RUNS[-20:],
+        "uptime_monitors": [public_uptime_monitor(UPTIME_MONITORS[monitor_id]) for monitor_id in sorted(UPTIME_MONITORS)],
         "active_timers": active_timer_summary(),
         "devices": devices,
         "recent_commands": RECENT_COMMANDS[-20:],
@@ -3108,6 +3301,7 @@ DASHBOARD_HTML = """<!doctype html>
     <button class="tab-button active" type="button" data-tab="overview">Overview</button>
     <button class="tab-button" type="button" data-tab="devices">Devices</button>
     <button class="tab-button" type="button" data-tab="events">Events</button>
+    <button class="tab-button" type="button" data-tab="uptime">Uptime</button>
     <button class="tab-button" type="button" data-tab="rules">Rules</button>
     <button class="tab-button" type="button" data-tab="actions">Actions</button>
     <button class="tab-button" type="button" data-tab="firmware">Firmware</button>
@@ -3230,6 +3424,28 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="events" id="buttonEvents"></div>
         </div>
       </section>
+    </section>
+    <section class="tab-panel" data-tab-panel="uptime">
+      <div class="panel">
+        <h2>Uptime Tracker</h2>
+        <div class="events">
+          <div class="event">
+            <div class="device-id">Register monitor</div>
+            <form class="action-form" id="uptimeForm">
+              <input id="uptimeId" type="hidden">
+              <input id="uptimeName" type="text" placeholder="Name, optional" autocomplete="off">
+              <input id="uptimeTarget" type="text" placeholder="IP, hostname, or https://example.com" autocomplete="off">
+              <input id="uptimeInterval" type="number" min="30" step="30" value="600" autocomplete="off">
+              <div class="action-row">
+                <button id="uptimeSubmitButton" type="submit">Add</button>
+                <button id="uptimeCancelEditButton" type="button">Cancel Edit</button>
+                <span class="meta" id="uptimeFormResult"></span>
+              </div>
+            </form>
+          </div>
+        </div>
+        <div class="events" id="uptimeMonitors"></div>
+      </div>
     </section>
     <section class="tab-panel" data-tab-panel="firmware">
       <div class="panel">
@@ -4033,6 +4249,123 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function formatInterval(seconds) {
+      seconds = Number(seconds || 0);
+      if (seconds < 60) return `${seconds}s`;
+      if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+      if (seconds % 60 === 0) return `${seconds / 60}m`;
+      return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    }
+
+    async function createUptimeMonitor(event) {
+      event.preventDefault();
+      const result = document.getElementById("uptimeFormResult");
+      const payload = {
+        id: document.getElementById("uptimeId").value,
+        name: document.getElementById("uptimeName").value,
+        target: document.getElementById("uptimeTarget").value,
+        interval_seconds: Number(document.getElementById("uptimeInterval").value || 600),
+        enabled: true,
+      };
+      try {
+        const response = await fetch("/uptime", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        resetUptimeForm();
+        result.textContent = payload.id ? "Saved" : "Added";
+        await refresh();
+      } catch (error) {
+        result.textContent = error.message;
+      }
+    }
+
+    function resetUptimeForm() {
+      document.getElementById("uptimeId").value = "";
+      document.getElementById("uptimeName").value = "";
+      document.getElementById("uptimeTarget").value = "";
+      document.getElementById("uptimeInterval").value = "600";
+      document.getElementById("uptimeSubmitButton").textContent = "Add";
+      document.getElementById("uptimeCancelEditButton").style.display = "none";
+    }
+
+    function editUptimeMonitor(monitor) {
+      document.getElementById("uptimeId").value = monitor.id || "";
+      document.getElementById("uptimeName").value = monitor.name || "";
+      document.getElementById("uptimeTarget").value = monitor.target || "";
+      document.getElementById("uptimeInterval").value = monitor.interval_seconds || 600;
+      document.getElementById("uptimeSubmitButton").textContent = "Save";
+      document.getElementById("uptimeCancelEditButton").style.display = "";
+      document.getElementById("uptimeFormResult").textContent = "";
+      setActiveTab("uptime");
+      document.getElementById("uptimeInterval").focus();
+    }
+
+    async function checkUptimeMonitor(monitorId, button) {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Checking";
+      try {
+        const response = await fetch(`/uptime/${encodeURIComponent(monitorId)}/check`, {method: "POST"});
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        await refresh();
+      } catch (_error) {
+        button.textContent = "Failed";
+        setTimeout(() => { button.textContent = original; button.disabled = false; }, 1200);
+        return;
+      }
+      button.textContent = original;
+      button.disabled = false;
+    }
+
+    async function deleteUptimeMonitor(monitorId) {
+      if (!window.confirm(`Remove uptime monitor ${monitorId}?`)) return;
+      await fetch(`/uptime/${encodeURIComponent(monitorId)}`, {method: "DELETE"});
+      await refresh();
+    }
+
+    function renderUptimeMonitors(monitors) {
+      const root = document.getElementById("uptimeMonitors");
+      root.replaceChildren();
+      if (!monitors || !monitors.length) {
+        root.append(el("div", "empty", "No uptime monitors registered."));
+        return;
+      }
+      const sorted = [...monitors].sort((a, b) => {
+        if (a.online !== b.online) return a.online ? 1 : -1;
+        return String(a.name || a.target).localeCompare(String(b.name || b.target));
+      });
+      for (const monitor of sorted) {
+        const item = el("div", "event");
+        const title = el("div", "device-id", text(monitor.name || monitor.target));
+        const status = el("span", `status ${monitor.online ? "online" : ""}`);
+        status.append(el("span", "dot"));
+        status.append(el("span", "", monitor.online ? "Up" : "Down"));
+        item.append(title);
+        item.append(status);
+        item.append(el("div", "meta", `${text(monitor.target)} | every ${formatInterval(monitor.interval_seconds)}`));
+        item.append(el("div", "meta", `last: ${monitor.last_checked_at ? new Date(monitor.last_checked_at * 1000).toLocaleString() : "not checked"} | next: ${monitor.next_check_at ? new Date(monitor.next_check_at * 1000).toLocaleTimeString() : "-"}`));
+        item.append(el("div", "", `${text(monitor.detail)}${monitor.latency_ms !== null && monitor.latency_ms !== undefined ? ` | ${monitor.latency_ms} ms` : ""}`));
+        const row = el("div", "action-row");
+        const check = el("button", "", "Check Now");
+        check.type = "button";
+        check.addEventListener("click", () => checkUptimeMonitor(monitor.id, check));
+        const edit = el("button", "", "Edit");
+        edit.type = "button";
+        edit.addEventListener("click", () => editUptimeMonitor(monitor));
+        const remove = el("button", "danger", "Remove");
+        remove.type = "button";
+        remove.addEventListener("click", () => deleteUptimeMonitor(monitor.id));
+        row.append(check, edit, remove);
+        item.append(row);
+        root.append(item);
+      }
+    }
+
     async function saveRule(form, result) {
       const data = new FormData(form);
       const steps = String(data.get("steps") || "")
@@ -4223,6 +4556,7 @@ DASHBOARD_HTML = """<!doctype html>
       renderActions(data.actions);
       renderRules(data.rules, data.devices, data.actions, data.recent_rule_runs);
       renderTimers(data.active_timers, data.devices);
+      renderUptimeMonitors(data.uptime_monitors);
       state.devices = data.devices || [];
       populateDeviceFilterOptions(state.devices);
       renderFilteredDevices();
@@ -4264,6 +4598,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshButton").addEventListener("click", refresh);
     document.getElementById("simulateButton").addEventListener("click", simulateTranscript);
     document.getElementById("timerForm").addEventListener("submit", createTimer);
+    document.getElementById("uptimeForm").addEventListener("submit", createUptimeMonitor);
+    document.getElementById("uptimeCancelEditButton").addEventListener("click", resetUptimeForm);
     document.getElementById("simulateTranscript").addEventListener("keydown", (event) => {
       if (event.key === "Enter") simulateTranscript();
     });
@@ -4276,6 +4612,7 @@ DASHBOARD_HTML = """<!doctype html>
     initTabs();
     initExpandedDevices();
     initDeviceFilters();
+    resetUptimeForm();
     refresh();
     state.timer = setInterval(refresh, state.refreshMs);
   </script>
@@ -4691,6 +5028,11 @@ class CommandHandler(BaseHTTPRequestHandler):
                 payload = {"timers": active_timer_summary()}
             json_response(self, 200, payload)
             return
+        if parsed.path == "/uptime":
+            with STATE_LOCK:
+                payload = {"monitors": [public_uptime_monitor(UPTIME_MONITORS[monitor_id]) for monitor_id in sorted(UPTIME_MONITORS)]}
+            json_response(self, 200, payload)
+            return
         if parsed.path == "/events/recent":
             with STATE_LOCK:
                 payload = {"recent_rule_runs": RECENT_RULE_RUNS[-20:]}
@@ -4921,6 +5263,38 @@ class CommandHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
 
+        if parsed.path == "/uptime":
+            try:
+                payload = read_optional_json_body(self)
+                with STATE_LOCK:
+                    monitor = upsert_uptime_monitor(payload)
+                json_response(self, 200, {"ok": True, "monitor": monitor})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path.startswith("/uptime/") and parsed.path.endswith("/check"):
+            monitor_id = clean_rule_id(parsed.path.removeprefix("/uptime/").removesuffix("/check"))
+            try:
+                with STATE_LOCK:
+                    monitor = dict(UPTIME_MONITORS.get(monitor_id, {}))
+                if not monitor:
+                    json_response(self, 404, {"ok": False, "error": "monitor not found"})
+                    return
+                result = check_uptime_monitor(monitor)
+                with STATE_LOCK:
+                    current = UPTIME_MONITORS[monitor_id]
+                    now = int(time.time())
+                    current.update(result)
+                    current["last_checked_at"] = now
+                    current["next_check_at"] = now + max(30, int(current.get("interval_seconds", 600) or 600))
+                    save_uptime_monitors()
+                    public = public_uptime_monitor(current)
+                json_response(self, 200, {"ok": True, "monitor": public})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
         if parsed.path.startswith("/rules/") and parsed.path.endswith("/test"):
             rule_id = clean_rule_id(parsed.path.removeprefix("/rules/").removesuffix("/test"))
             try:
@@ -5085,6 +5459,13 @@ class CommandHandler(BaseHTTPRequestHandler):
                 timer = cancel_timer(timer_id, "")
             json_response(self, 200, {"ok": True, "timer_id": timer_id, "removed": timer is not None, "timer": timer})
             return
+        if parsed.path.startswith("/uptime/"):
+            monitor_id = clean_rule_id(parsed.path.removeprefix("/uptime/"))
+            with STATE_LOCK:
+                existed = UPTIME_MONITORS.pop(monitor_id, None) is not None
+                save_uptime_monitors()
+            json_response(self, 200, {"ok": True, "monitor_id": monitor_id, "removed": existed})
+            return
         if parsed.path.startswith("/firmware/catalog/"):
             parts = parsed.path.strip("/").split("/")
             if len(parts) not in (3, 4):
@@ -5118,7 +5499,9 @@ def main() -> None:
     load_device_registry()
     load_event_rules()
     load_timers()
+    load_uptime_monitors()
     threading.Thread(target=timer_worker, name="timer-worker", daemon=True).start()
+    threading.Thread(target=uptime_worker, name="uptime-worker", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), CommandHandler)
     print(f"Listening on http://{HOST}:{PORT}")
     print("POST audio to /audio/command with ELEVENLABS_API_KEY set in the environment.")
