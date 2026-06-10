@@ -950,6 +950,9 @@ def persisted_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]:
         "firmware_version",
         "firmware_project",
         "firmware_build",
+        "last_seen_via",
+        "last_local_seen",
+        "last_relay_seen",
     }
     result = {key: value for key, value in device.items() if key in allowed}
     result["id"] = device_id
@@ -1260,6 +1263,9 @@ def public_device(device_id: str) -> dict[str, Any]:
         "status": device.get("status", {}),
         "first_seen": device.get("first_seen"),
         "last_seen": device.get("last_seen"),
+        "last_seen_via": device.get("last_seen_via", ""),
+        "last_local_seen": device.get("last_local_seen"),
+        "last_relay_seen": device.get("last_relay_seen"),
         "remote_addr": device.get("remote_addr"),
         "user_agent": device.get("user_agent", ""),
         "request_count": device.get("request_count", 0),
@@ -1273,7 +1279,7 @@ def public_device(device_id: str) -> dict[str, Any]:
     }
 
 
-def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None) -> None:
+def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None, source: str = "local") -> None:
     now = int(time.time())
     device = DEVICES.setdefault(device_id, {
         "id": device_id,
@@ -1287,6 +1293,11 @@ def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None) 
         device["friendly_name"] = DEVICE_FRIENDLY_NAMES[device_id]
     device["session_seen"] = True
     device["last_seen"] = now
+    device["last_seen_via"] = source
+    if source == "relay":
+        device["last_relay_seen"] = now
+    else:
+        device["last_local_seen"] = now
     device["request_count"] = int(device.get("request_count", 0)) + 1
     if handler is not None:
         device["remote_addr"] = handler.client_address[0]
@@ -1296,8 +1307,9 @@ def touch_device(device_id: str, handler: BaseHTTPRequestHandler | None = None) 
         dispatch_server_event("device_online", device_id, device_type=str(device.get("type", "unknown")))
 
 
-def register_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None) -> dict[str, Any]:
-    touch_device(device_id, handler)
+def register_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None,
+                    source: str = "local") -> dict[str, Any]:
+    touch_device(device_id, handler, source)
     device = DEVICES[device_id]
 
     if "type" in payload:
@@ -1758,6 +1770,9 @@ def external_dashboard_snapshot() -> dict[str, Any]:
                 "status",
                 "first_seen",
                 "last_seen",
+                "last_seen_via",
+                "last_local_seen",
+                "last_relay_seen",
                 "online",
                 "online_detail",
                 "age_seconds",
@@ -1817,10 +1832,10 @@ def process_relay_event(event: dict[str, Any]) -> None:
         payload = {}
 
     if event_type == "register":
-        register_device(device_id, payload)
+        register_device(device_id, payload, source="relay")
         return
     if event_type == "button":
-        record_button_event(device_id, payload)
+        record_button_event(device_id, payload, source="relay")
         return
     raise ValueError(f"unsupported relay event type: {event_type}")
 
@@ -2007,8 +2022,9 @@ def remove_device(device_id: str) -> None:
     save_device_registry()
 
 
-def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None) -> dict[str, Any]:
-    touch_device(device_id, handler)
+def record_button_event(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None,
+                        source: str = "local") -> dict[str, Any]:
+    touch_device(device_id, handler, source)
     event = {
         "device_id": device_id,
         "event_type": "button",
@@ -4141,7 +4157,10 @@ DASHBOARD_HTML = """<!doctype html>
         stateBlock.append(keyValueRows([
           ["Online", device.online ? "yes" : "no"],
           ["Detail", device.online_detail],
+          ["Seen via", device.last_seen_via || ""],
           ["Last seen", age(device.age_seconds)],
+          ["Last local", device.last_local_seen ? new Date(device.last_local_seen * 1000).toLocaleString() : ""],
+          ["Last relay", device.last_relay_seen ? new Date(device.last_relay_seen * 1000).toLocaleString() : ""],
           ["Requests", device.request_count],
           ["Pending events", device.pending_events],
           ["Muted", device.muted ? "yes" : "no"],
