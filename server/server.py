@@ -3561,13 +3561,19 @@ DASHBOARD_HTML = """<!doctype html>
       <section class="stats" id="stats"></section>
       <section class="overview-grid">
         <div class="panel-stack">
-          <div class="panel">
-            <h2>Attention</h2>
-            <div class="events" id="attention"></div>
+          <div class="panel collapsible-panel" data-panel-id="attention">
+            <div class="panel-header">
+              <h2>Attention</h2>
+              <button class="collapse-button" type="button" aria-label="Toggle Attention" aria-expanded="true">-</button>
+            </div>
+            <div class="events collapsible-content" id="attention"></div>
           </div>
-          <div class="panel">
-            <h2>Recent Activity</h2>
-            <div class="events" id="activity"></div>
+          <div class="panel collapsible-panel" data-panel-id="recentActivity">
+            <div class="panel-header">
+              <h2>Recent Activity</h2>
+              <button class="collapse-button" type="button" aria-label="Toggle Recent Activity" aria-expanded="true">-</button>
+            </div>
+            <div class="events collapsible-content" id="activity"></div>
           </div>
         </div>
         <div class="panel-stack">
