@@ -515,6 +515,11 @@ DASHBOARD_HTML = """<!doctype html>
     .stat, .row { border: 1px solid #d7d7d2; border-radius: 8px; background: #fff; padding: 12px; }
     .stat strong { display: block; font-size: 1.6rem; }
     .rows { display: grid; gap: 8px; }
+    details.panel { margin-top: 24px; }
+    details.panel > summary { cursor: pointer; font-weight: 700; list-style-position: outside; }
+    details.panel > summary h2 { display: inline; margin-left: 4px; }
+    .device-meta { display: grid; gap: 3px; margin-top: 8px; }
+    pre { margin: 10px 0 0; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .82rem; }
     code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     button, input { font: inherit; }
     input { min-width: 260px; padding: 8px; }
@@ -540,10 +545,14 @@ DASHBOARD_HTML = """<!doctype html>
     <section class="grid" id="summary"></section>
     <h2>Remote Devices</h2>
     <section class="rows" id="devices"></section>
-    <h2>Recent Relay Events</h2>
-    <section class="rows" id="events"></section>
+    <details class="panel" id="eventsPanel" open>
+      <summary><h2>Recent Relay Events</h2></summary>
+      <section class="rows" id="events"></section>
+    </details>
     <h2>Home Snapshot</h2>
     <section class="rows" id="home"></section>
+    <h2>Home Devices</h2>
+    <section class="rows" id="homeDevices"></section>
   </main>
   <script>
     const tokenKey = "draconRelayDashboardToken";
@@ -563,6 +572,11 @@ DASHBOARD_HTML = """<!doctype html>
     function timeText(value) {
       if (!value) return "";
       return new Date(value * 1000).toLocaleString();
+    }
+    function jsonBlock(value) {
+      const block = el("pre", "");
+      block.textContent = JSON.stringify(value, null, 2);
+      return block;
     }
     function authHeaders() {
       const saved = localStorage.getItem(tokenKey) || "";
@@ -622,6 +636,43 @@ DASHBOARD_HTML = """<!doctype html>
         const summary = payload.summary || {};
         row.append(el("div", "muted", `Devices ${summary.device_count ?? "?"}, online ${summary.online_count ?? "?"}, recent buttons ${summary.recent_button_event_count ?? "?"}`));
         home.append(row);
+      }
+
+      const homeDevices = document.getElementById("homeDevices");
+      clear(homeDevices);
+      const homePayload = data.home?.payload || {};
+      const devicesFromHome = Array.isArray(homePayload.devices) ? homePayload.devices : [];
+      if (!devicesFromHome.length) {
+        homeDevices.append(el("div", "row muted", "No home devices in the latest snapshot."));
+      }
+      for (const device of devicesFromHome) {
+        const row = el("details", "row");
+        row.open = false;
+        const summaryNode = el("summary", "");
+        const name = device.display_name || device.friendly_name || device.id || "unknown device";
+        summaryNode.append(el("strong", "", name));
+        summaryNode.append(el("span", "muted", ` ${device.online ? "online" : "offline"}${device.online_detail ? `, ${device.online_detail}` : ""}`));
+        row.append(summaryNode);
+        const meta = el("div", "device-meta");
+        for (const [label, value] of [
+          ["ID", device.id],
+          ["Type", device.type],
+          ["Model", device.model],
+          ["Firmware", device.firmware_version || device.firmware?.version],
+          ["Seen via", device.last_seen_via],
+          ["Last seen", timeText(device.last_seen)],
+          ["Last local", timeText(device.last_local_seen)],
+          ["Last relay", timeText(device.last_relay_seen)],
+          ["Pending events", device.pending_events],
+          ["Capabilities", Array.isArray(device.capabilities) ? device.capabilities.join(", ") : ""],
+        ]) {
+          if (value !== undefined && value !== null && value !== "") {
+            meta.append(el("div", "muted", `${label}: ${value}`));
+          }
+        }
+        row.append(meta);
+        row.append(jsonBlock(device));
+        homeDevices.append(row);
       }
     }
     async function load() {
