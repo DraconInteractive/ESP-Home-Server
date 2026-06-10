@@ -623,6 +623,7 @@ DASHBOARD_HTML = """<!doctype html>
     const statusEl = document.getElementById("status");
     const auth = document.getElementById("auth");
     const token = document.getElementById("token");
+    const openHomeDevices = new Set();
 
     function el(tag, className, text) {
       const node = document.createElement(tag);
@@ -781,7 +782,13 @@ DASHBOARD_HTML = """<!doctype html>
       }
       for (const device of devicesFromHome) {
         const row = el("details", "row");
-        row.open = false;
+        const deviceKey = String(device.id || device.display_name || "");
+        row.open = openHomeDevices.has(deviceKey);
+        row.addEventListener("toggle", () => {
+          if (!deviceKey) return;
+          if (row.open) openHomeDevices.add(deviceKey);
+          else openHomeDevices.delete(deviceKey);
+        });
         const summaryNode = el("summary", "");
         summaryNode.className = "row-head";
         const title = el("div", "row-title");
