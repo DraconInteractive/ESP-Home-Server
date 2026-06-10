@@ -1872,8 +1872,13 @@ def process_relay_device_statuses(devices: list[Any]) -> int:
         update_device_status(device_id, {"status": payload}, source="relay")
         device = DEVICES.get(device_id, {})
         if isinstance(raw_device.get("last_seen"), (int, float)):
-            device["last_seen"] = int(raw_device["last_seen"])
-            device["last_relay_seen"] = int(raw_device["last_seen"])
+            relay_seen = int(raw_device["last_seen"])
+            current_seen = device.get("last_seen")
+            if not isinstance(current_seen, (int, float)) or relay_seen > int(current_seen):
+                device["last_seen"] = relay_seen
+            current_relay_seen = device.get("last_relay_seen")
+            if not isinstance(current_relay_seen, (int, float)) or relay_seen > int(current_relay_seen):
+                device["last_relay_seen"] = relay_seen
         if raw_device.get("remote_addr"):
             device["remote_addr"] = str(raw_device.get("remote_addr", ""))[:120]
         if raw_device.get("user_agent"):
