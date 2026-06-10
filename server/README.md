@@ -19,6 +19,23 @@ For manual restarts over SSH from the repo root:
 ./restart-device-server.sh
 ```
 
+The dashboard can show a restart button if explicitly enabled:
+
+```sh
+export COMMAND_SERVER_RESTART_ENABLED="1"
+export COMMAND_SERVER_RESTART_COMMAND="sudo -n sv restart spoken-command-server"
+```
+
+The server process cannot enter a sudo password, so antiX/runit installs need a
+targeted sudoers rule. Use `sudo visudo -f /etc/sudoers.d/spoken-command-server`
+and add:
+
+```text
+demo ALL=(root) NOPASSWD: /usr/bin/sv restart spoken-command-server
+```
+
+Adjust `demo` or `/usr/bin/sv` if your service user or `sv` path differs.
+
 On antiX/runit systems, install the startup service from the repo root:
 
 ```sh

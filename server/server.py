@@ -13,6 +13,7 @@ import json
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -88,6 +89,11 @@ ACTION_SCRIPT_DIR = os.environ.get(
 )
 ACTION_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_ACTION_TIMEOUT_SECONDS", "15.0"))
 RECENT_HISTORY_LIMIT = int(os.environ.get("COMMAND_SERVER_RECENT_HISTORY_LIMIT", "100"))
+RESTART_ENABLED = os.environ.get("COMMAND_SERVER_RESTART_ENABLED", "0") == "1"
+RESTART_COMMAND = shlex.split(
+    os.environ.get("COMMAND_SERVER_RESTART_COMMAND", "sudo -n sv restart spoken-command-server")
+)
+RESTART_DELAY_SECONDS = max(0.1, float(os.environ.get("COMMAND_SERVER_RESTART_DELAY_SECONDS", "0.5")))
 SERVER_STARTED_AT = int(time.time())
 
 RECENT_COMMANDS: list[dict[str, Any]] = []
@@ -432,6 +438,28 @@ def startup_diagnostics() -> list[dict[str, Any]]:
         },
     ]
     return checks
+
+
+def schedule_server_restart() -> None:
+    if not RESTART_ENABLED:
+        raise RuntimeError("server restart is not enabled")
+    if not RESTART_COMMAND:
+        raise RuntimeError("server restart command is empty")
+
+    def runner() -> None:
+        time.sleep(RESTART_DELAY_SECONDS)
+        try:
+            subprocess.Popen(
+                RESTART_COMMAND,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            print(f"Server restart command failed to start: {exc}")
+
+    threading.Thread(target=runner, name="server-restart", daemon=True).start()
 
 
 def load_script_actions() -> None:
@@ -1729,6 +1757,7 @@ def dashboard_snapshot() -> dict[str, Any]:
             "media_snapshot_ttl_seconds": MEDIA_SNAPSHOT_TTL_SECONDS,
             "media_stream_idle_seconds": MEDIA_STREAM_IDLE_SECONDS,
             "diagnostics": startup_diagnostics(),
+            "restart_enabled": RESTART_ENABLED,
         },
         "summary": {
             "device_count": len(devices),
@@ -3515,6 +3544,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="toolbar">
       <span id="refreshState">Waiting for first refresh</span>
       <button id="refreshButton" type="button">Refresh</button>
+      <button id="restartButton" type="button" disabled>Restart</button>
     </div>
   </header>
   <nav class="tabs" aria-label="Dashboard sections">
@@ -4769,9 +4799,36 @@ DASHBOARD_HTML = """<!doctype html>
       return details;
     }
 
+    function configureRestartButton(server) {
+      const button = document.getElementById("restartButton");
+      const enabled = Boolean(server && server.restart_enabled);
+      button.disabled = !enabled;
+      button.title = enabled ? "Restart spoken-command-server" : "Restart is disabled in server configuration";
+    }
+
+    async function restartServer() {
+      const button = document.getElementById("restartButton");
+      if (button.disabled) return;
+      if (!confirm("Restart spoken-command-server now?")) return;
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Restarting...";
+      try {
+        const response = await fetch("/server/restart", {method: "POST"});
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        document.getElementById("refreshState").textContent = "Restart requested";
+      } catch (error) {
+        document.getElementById("refreshState").textContent = error.message;
+        button.disabled = false;
+        button.textContent = original;
+      }
+    }
+
     function render(data) {
       document.getElementById("serverMeta").textContent =
         `Listening on ${data.server.host}:${data.server.port} | uptime ${uptime(data.server.uptime_seconds)} | stale after ${data.server.device_stale_seconds}s`;
+      configureRestartButton(data.server);
       renderStats(data);
       renderAttention(data.devices);
       renderActivity(data);
@@ -4820,6 +4877,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     document.getElementById("refreshButton").addEventListener("click", refresh);
     document.getElementById("simulateButton").addEventListener("click", simulateTranscript);
+    document.getElementById("restartButton").addEventListener("click", restartServer);
     document.getElementById("timerForm").addEventListener("submit", createTimer);
     document.getElementById("uptimeForm").addEventListener("submit", createUptimeMonitor);
     document.getElementById("uptimeCancelEditButton").addEventListener("click", resetUptimeForm);
@@ -5355,6 +5413,15 @@ class CommandHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+
+        if parsed.path == "/server/restart":
+            try:
+                schedule_server_restart()
+                json_response(self, 202, {"ok": True, "message": "restart scheduled"})
+            except Exception as exc:
+                json_response(self, 403, {"ok": False, "error": str(exc)})
+            return
+
         if parsed.path == "/commands/simulate":
             try:
                 payload = read_optional_json_body(self)
