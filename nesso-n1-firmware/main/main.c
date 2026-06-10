@@ -30,7 +30,7 @@
 
 static const char *TAG = "nesso_n1";
 #define FIRMWARE_PROJECT "nesso-n1-firmware"
-#define FIRMWARE_VERSION "0.0.2d"
+#define FIRMWARE_VERSION "0.0.3d"
 #define FIRMWARE_DEVICE_TYPE "arduino-nesso-n1"
 
 #define LCD_HOST SPI2_HOST
@@ -87,7 +87,9 @@ static const char *TAG = "nesso_n1";
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
 #define WIFI_MAX_RETRIES 5
-#define REGISTER_INTERVAL_US (30LL * 1000LL * 1000LL)
+#define REGISTER_INTERVAL_US (60LL * 60LL * 1000LL * 1000LL)
+#define REGISTER_RETRY_INTERVAL_US (30LL * 1000LL * 1000LL)
+#define STATUS_INTERVAL_US (30LL * 1000LL * 1000LL)
 #define EVENT_POLL_INTERVAL_US (5LL * 1000LL * 1000LL)
 #define BATTERY_READ_INTERVAL_US (10LL * 1000LL * 1000LL)
 #define ALERT_DISPLAY_TIME_US (5LL * 1000LL * 1000LL)
@@ -117,6 +119,7 @@ static char s_display_text[DISPLAY_TEXT_MAX] = "Display ready.";
 static char s_relay_device_secret[RELAY_SECRET_MAX] = "";
 static char s_register_body[1200];
 static http_response_t s_register_response;
+static char s_status_body[384];
 static int s_battery_pct = -1;
 static int s_battery_mv = -1;
 static uint32_t s_key1_count;
@@ -791,6 +794,40 @@ static void register_with_server(void)
     }
 }
 
+static void send_status_update(void)
+{
+    if (!s_wifi_ready || strlen(CONFIG_NESSO_N1_SERVER_URL) == 0) {
+        return;
+    }
+    if (relay_enabled() && strlen(s_relay_device_secret) == 0) {
+        return;
+    }
+
+    char path[96] = {0};
+    int status = 0;
+    snprintf(path, sizeof(path), "/devices/%s/status", s_device_id);
+    snprintf(s_status_body, sizeof(s_status_body),
+             "{"
+             "\"status\":{"
+             "\"ip\":\"%s\","
+             "\"battery_pct\":%d,"
+             "\"battery_mv\":%d,"
+             "\"uptime_ms\":%" PRIu32
+             "}"
+             "}",
+             s_ip_addr,
+             s_battery_pct,
+             s_battery_mv,
+             (uint32_t)(esp_timer_get_time() / 1000));
+
+    esp_err_t ret = post_json(path, s_status_body, &status);
+    if (ret == ESP_OK && status >= 200 && status < 300) {
+        ESP_LOGI(TAG, "Status update sent%s", relay_enabled() ? " via relay" : "");
+    } else {
+        ESP_LOGW(TAG, "Status update failed: err=%s status=%d", esp_err_to_name(ret), status);
+    }
+}
+
 static bool extract_json_string(const char *json, const char *key, char *out, size_t out_size)
 {
     char pattern[40] = {0};
@@ -936,14 +973,23 @@ void app_main(void)
         render_home();
     }
 
-    int64_t next_register = esp_timer_get_time() + REGISTER_INTERVAL_US;
+    int64_t next_register = esp_timer_get_time() + (relay_enabled() && strlen(s_relay_device_secret) == 0
+                                                        ? REGISTER_RETRY_INTERVAL_US
+                                                        : REGISTER_INTERVAL_US);
+    int64_t next_status = esp_timer_get_time() + STATUS_INTERVAL_US;
     int64_t next_poll = 0;
     int64_t next_battery = esp_timer_get_time() + BATTERY_READ_INTERVAL_US;
     while (true) {
         int64_t now = esp_timer_get_time();
         if (s_wifi_ready && now >= next_register) {
-            next_register = now + REGISTER_INTERVAL_US;
             register_with_server();
+            next_register = now + (relay_enabled() && strlen(s_relay_device_secret) == 0
+                                       ? REGISTER_RETRY_INTERVAL_US
+                                       : REGISTER_INTERVAL_US);
+        }
+        if (s_wifi_ready && now >= next_status) {
+            next_status = now + STATUS_INTERVAL_US;
+            send_status_update();
         }
         if (s_wifi_ready && now >= next_poll) {
             next_poll = now + EVENT_POLL_INTERVAL_US;

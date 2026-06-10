@@ -1354,6 +1354,23 @@ def register_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRe
     return public_device(device_id)
 
 
+def update_device_status(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler | None = None,
+                         source: str = "local") -> dict[str, Any]:
+    touch_device(device_id, handler, source)
+    device = DEVICES[device_id]
+    raw_status = payload.get("status") if isinstance(payload.get("status"), dict) else payload
+    if not isinstance(raw_status, dict):
+        raw_status = {}
+    status = dict(device.get("status", {})) if isinstance(device.get("status"), dict) else {}
+    for key, value in raw_status.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            status[str(key)[:40]] = value
+    device["status"] = status
+    maybe_dispatch_low_battery(device_id, status)
+    save_device_registry()
+    return public_device(device_id)
+
+
 def maybe_dispatch_low_battery(device_id: str, status: dict[str, Any]) -> None:
     raw_value = None
     for key in ("battery_percent", "battery_pct", "battery_level", "battery"):
@@ -1833,6 +1850,9 @@ def process_relay_event(event: dict[str, Any]) -> None:
 
     if event_type == "register":
         register_device(device_id, payload, source="relay")
+        return
+    if event_type == "status":
+        update_device_status(device_id, payload, source="relay")
         return
     if event_type == "button":
         record_button_event(device_id, payload, source="relay")
@@ -5511,6 +5531,20 @@ class CommandHandler(BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     event = record_button_event(device_id, payload, self)
                 json_response(self, 200, {"ok": True, "device_id": device_id, "button_event": event})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path.startswith("/devices/") and parsed.path.endswith("/status"):
+            device_id = clean_device_id(parsed.path.removeprefix("/devices/").removesuffix("/status"))
+            try:
+                body = read_request_body(self)
+                payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("status body must be a JSON object")
+                with STATE_LOCK:
+                    device = update_device_status(device_id, payload, self)
+                json_response(self, 200, {"ok": True, "device": device})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return

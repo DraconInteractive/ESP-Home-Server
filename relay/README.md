@@ -48,7 +48,7 @@ First registration response includes:
 ```
 
 The remote device should persist that `device_secret` and use it for later
-registration updates and button events:
+status, registration updates, and button events:
 
 ```http
 Authorization: Bearer generated-device-secret
@@ -89,6 +89,7 @@ Remote devices:
 
 ```text
 POST /devices/{device_id}/register
+POST /devices/{device_id}/status
 POST /devices/{device_id}/button
 ```
 
@@ -115,6 +116,15 @@ curl https://relay.dracon.au/devices/remote-button-01/register \
   -H 'Authorization: Bearer replace-with-device-enrollment-token' \
   -H 'Content-Type: application/json' \
   --data '{"type":"button","model":"Seeed XIAO ESP32-C3","capabilities":["button"],"status":{"battery_percent":95}}'
+```
+
+Update device status without re-registering metadata:
+
+```sh
+curl https://relay.dracon.au/devices/remote-button-01/status \
+  -H 'Authorization: Bearer generated-device-secret' \
+  -H 'Content-Type: application/json' \
+  --data '{"status":{"battery_percent":94,"uptime_ms":120000}}'
 ```
 
 Record a button press:

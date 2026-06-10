@@ -187,7 +187,7 @@ def authorize_registration(handler: BaseHTTPRequestHandler, device_id: str) -> t
         if token_matches(existing, provided):
             return AuthResult(True, HTTPStatus.OK, ""), None
         if token_matches(DEVICE_ENROLL_TOKEN, provided):
-            return AuthResult(True, HTTPStatus.OK, ""), None
+            return AuthResult(True, HTTPStatus.OK, ""), existing
         return AuthResult(False, HTTPStatus.UNAUTHORIZED, "unauthorized"), None
 
     if not DEVICE_ENROLL_TOKEN:
@@ -371,6 +371,18 @@ def enqueue_event(device_id: str, event_type: str, payload: dict[str, Any]) -> d
 
 def queue_register_event(device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return enqueue_event(device_id, "register", payload)
+
+
+def queue_status_event(device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    status = payload.get("status") if isinstance(payload.get("status"), dict) else payload
+    if not isinstance(status, dict):
+        status = {}
+    clean_status = {
+        str(key)[:40]: value
+        for key, value in status.items()
+        if isinstance(value, (str, int, float, bool)) or value is None
+    }
+    return enqueue_event(device_id, "status", {"status": clean_status})
 
 
 def queue_button_event(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -934,6 +946,22 @@ class RelayHandler(BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     device = upsert_device(device_id, {"status": {"last_button_at": int(time.time())}}, self)
                     event = queue_button_event(device_id, payload, self)
+                json_response(self, 200, {"ok": True, "device": device, "relay_event": event})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path.startswith("/devices/") and parsed.path.endswith("/status"):
+            device_id = clean_id(parsed.path.removeprefix("/devices/").removesuffix("/status"))
+            auth = require_device_token(self, device_id)
+            if not auth.ok:
+                auth_error(self, auth)
+                return
+            try:
+                payload = read_json_body(self)
+                with STATE_LOCK:
+                    device = upsert_device(device_id, payload, self)
+                    event = queue_status_event(device_id, payload)
                 json_response(self, 200, {"ok": True, "device": device, "relay_event": event})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
