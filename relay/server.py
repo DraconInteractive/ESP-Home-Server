@@ -927,9 +927,11 @@ class RelayHandler(BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     device = upsert_device(device_id, payload, self)
                     event = queue_register_event(device_id, payload)
-                response = {"ok": True, "device": device, "relay_event": event}
+                response = {"ok": True}
                 if device_secret:
                     response["device_secret"] = device_secret
+                response["device"] = device
+                response["relay_event"] = event
                 json_response(self, 200, response)
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
