@@ -576,6 +576,11 @@ DASHBOARD_HTML = """<!doctype html>
     .muted { color: var(--muted); font-size: .88rem; }
     .top-status { text-align: right; white-space: nowrap; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 16px; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 20px 0 0; border-bottom: 1px solid var(--border); }
+    .tab-button { border-bottom: 0; border-radius: 6px 6px 0 0; color: var(--muted); }
+    .tab-button.active { color: var(--text); background: var(--accent-soft); border-color: var(--accent); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
     .stat, .row { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
     .stat { padding: 13px 14px; border-top: 3px solid var(--accent); }
     .stat strong { display: block; font-size: 1.55rem; margin-top: 4px; }
@@ -651,19 +656,31 @@ DASHBOARD_HTML = """<!doctype html>
       <button type="submit">Save</button>
     </form>
     <section class="grid" id="summary"></section>
-    <div class="section-title"><h2>Remote Devices</h2><span class="muted" id="remoteDeviceCount"></span></div>
-    <section class="rows" id="devices"></section>
-    <details class="panel" id="eventsPanel" open>
-      <summary><div class="section-title"><h2>Recent Relay Events</h2><span class="muted" id="relayEventCount"></span></div></summary>
+    <nav class="tabs" aria-label="Relay dashboard sections">
+      <button class="tab-button active" type="button" data-tab="events">Events</button>
+      <button class="tab-button" type="button" data-tab="devices">Devices</button>
+      <button class="tab-button" type="button" data-tab="uptime">Uptime</button>
+    </nav>
+    <section class="tab-panel active" data-tab-panel="events">
+      <div class="section-title"><h2>Recent Relay Events</h2><span class="muted" id="relayEventCount"></span></div>
       <section class="rows" id="events"></section>
-    </details>
-    <div class="section-title"><h2>Home Snapshot</h2><span class="muted" id="homeSnapshotAge"></span></div>
-    <section class="rows" id="home"></section>
-    <div class="section-title"><h2>Home Devices</h2><span class="muted" id="homeDeviceCount"></span></div>
-    <section class="rows" id="homeDevices"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="devices">
+      <div class="section-title"><h2>Remote Devices</h2><span class="muted" id="remoteDeviceCount"></span></div>
+      <section class="rows" id="devices"></section>
+      <div class="section-title"><h2>Home Devices</h2><span class="muted" id="homeDeviceCount"></span></div>
+      <section class="rows" id="homeDevices"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="uptime">
+      <div class="section-title"><h2>Home Snapshot</h2><span class="muted" id="homeSnapshotAge"></span></div>
+      <section class="rows" id="home"></section>
+      <div class="section-title"><h2>Uptime Checks</h2><span class="muted" id="uptimeCount"></span></div>
+      <section class="rows" id="uptimeMonitors"></section>
+    </section>
   </main>
   <script>
     const tokenKey = "draconRelayDashboardToken";
+    const tabKey = "draconRelayDashboardTab";
     const statusEl = document.getElementById("status");
     const auth = document.getElementById("auth");
     const token = document.getElementById("token");
@@ -718,6 +735,22 @@ DASHBOARD_HTML = """<!doctype html>
       if (days) return `${days}d ${hours}h`;
       if (hours) return `${hours}h ${minutes}m`;
       return `${minutes}m`;
+    }
+    function setActiveTab(tabName) {
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === tabName);
+      });
+      document.querySelectorAll(".tab-panel").forEach((panel) => {
+        panel.classList.toggle("active", panel.dataset.tabPanel === tabName);
+      });
+      localStorage.setItem(tabKey, tabName);
+    }
+    function initTabs() {
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+      });
+      const saved = localStorage.getItem(tabKey) || "events";
+      setActiveTab(document.querySelector(`[data-tab="${saved}"]`) ? saved : "events");
     }
     function authHeaders() {
       const saved = localStorage.getItem(tokenKey) || "";
@@ -864,6 +897,36 @@ DASHBOARD_HTML = """<!doctype html>
         row.append(jsonBlock(device));
         homeDevices.append(row);
       }
+
+      const uptimeMonitors = document.getElementById("uptimeMonitors");
+      clear(uptimeMonitors);
+      const monitors = Array.isArray(homePayload.uptime_monitors) ? homePayload.uptime_monitors : [];
+      const onlineChecks = monitors.filter((monitor) => monitor.online).length;
+      document.getElementById("uptimeCount").textContent = `${onlineChecks}/${monitors.length} online`;
+      if (!monitors.length) {
+        uptimeMonitors.append(el("div", "row muted", "No uptime checks in the latest home snapshot."));
+      }
+      for (const monitor of monitors) {
+        const row = el("div", "row");
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", monitor.name || monitor.id || "uptime check"));
+        title.append(el("div", "muted meta-line", monitor.target || ""));
+        head.append(title);
+        head.append(statusPill(monitor.online, monitor.detail));
+        row.append(head);
+        const meta = el("div", "device-meta");
+        meta.append(kv("ID", monitor.id));
+        meta.append(kv("Last checked", timeText(monitor.last_checked_at)));
+        meta.append(kv("Next check", timeText(monitor.next_check_at)));
+        meta.append(kv("Interval", `${monitor.interval_seconds || 0}s`));
+        meta.append(kv("Latency", monitor.latency_ms === null || monitor.latency_ms === undefined ? "" : `${monitor.latency_ms}ms`));
+        meta.append(kv("Status code", monitor.status_code));
+        meta.append(kv("Enabled", monitor.enabled === false ? "no" : "yes"));
+        row.append(meta);
+        row.append(jsonBlock(monitor));
+        uptimeMonitors.append(row);
+      }
     }
     async function load() {
       auth.hidden = true;
@@ -879,6 +942,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       render(await response.json());
     }
+    initTabs();
     load();
     setInterval(load, 5000);
   </script>

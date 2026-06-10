@@ -1793,6 +1793,7 @@ def external_dashboard_snapshot() -> dict[str, Any]:
         },
         "summary": snapshot.get("summary", {}),
         "devices": [],
+        "uptime_monitors": snapshot.get("uptime_monitors", []),
         "recent_button_events": snapshot.get("recent_button_events", []),
         "recent_rule_runs": snapshot.get("recent_rule_runs", []),
     }
