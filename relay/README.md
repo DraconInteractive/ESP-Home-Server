@@ -85,6 +85,23 @@ If `RELAY_DASHBOARD_TOKEN` is set, `/dashboard-data` requires:
 Authorization: Bearer <dashboard-token>
 ```
 
+The dashboard can also issue temporary browser sessions through an 8-digit code
+sent to ntfy. Configure:
+
+```sh
+RELAY_NTFY_URL=https://ntfy.sh
+RELAY_NTFY_TOPIC=your-topic
+RELAY_NTFY_TOKEN=
+RELAY_NTFY_TITLE=Dracon Relay
+RELAY_DASHBOARD_CODE_TTL_SECONDS=300
+RELAY_DASHBOARD_CODE_REQUEST_SECONDS=60
+RELAY_DASHBOARD_SESSION_SECONDS=43200
+```
+
+When enabled, the dashboard login screen can request a phone code, verify it,
+and store a temporary session token in browser local storage. The long dashboard
+token remains valid as a fallback.
+
 Remote devices:
 
 ```text

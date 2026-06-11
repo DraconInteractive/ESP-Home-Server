@@ -9,6 +9,7 @@ polls those events using an outbound authenticated connection.
 from __future__ import annotations
 
 import hmac
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,9 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 
 HOST = os.environ.get("RELAY_HOST", "127.0.0.1")
@@ -38,12 +41,22 @@ DEVICE_ENROLL_TOKEN = os.environ.get("RELAY_DEVICE_ENROLL_TOKEN", "")
 SYNC_TOKEN = os.environ.get("RELAY_SYNC_TOKEN", "")
 DASHBOARD_TOKEN = os.environ.get("RELAY_DASHBOARD_TOKEN", "")
 ADMIN_TOKEN = os.environ.get("RELAY_ADMIN_TOKEN", DASHBOARD_TOKEN)
+NTFY_URL = os.environ.get("RELAY_NTFY_URL", "https://ntfy.sh").rstrip("/")
+NTFY_TOPIC = os.environ.get("RELAY_NTFY_TOPIC", "")
+NTFY_TOKEN = os.environ.get("RELAY_NTFY_TOKEN", "")
+NTFY_TITLE = os.environ.get("RELAY_NTFY_TITLE", "Dracon Relay")
+DASHBOARD_CODE_TTL_SECONDS = int(os.environ.get("RELAY_DASHBOARD_CODE_TTL_SECONDS", "300"))
+DASHBOARD_CODE_REQUEST_SECONDS = int(os.environ.get("RELAY_DASHBOARD_CODE_REQUEST_SECONDS", "60"))
+DASHBOARD_SESSION_SECONDS = int(os.environ.get("RELAY_DASHBOARD_SESSION_SECONDS", str(12 * 60 * 60)))
 EVENT_LEASE_SECONDS = int(os.environ.get("RELAY_EVENT_LEASE_SECONDS", "60"))
 MAX_JSON_BYTES = int(os.environ.get("RELAY_MAX_JSON_BYTES", str(256 * 1024)))
 RECENT_LIMIT = int(os.environ.get("RELAY_RECENT_LIMIT", "50"))
 SERVER_STARTED_AT = int(time.time())
 
 STATE_LOCK = threading.RLock()
+DASHBOARD_CODE: dict[str, Any] = {}
+DASHBOARD_SESSIONS: dict[str, int] = {}
+DASHBOARD_CODE_LAST_REQUEST_AT = 0
 
 
 @dataclass(frozen=True)
@@ -132,6 +145,108 @@ def require_static_token(handler: BaseHTTPRequestHandler, expected: str, role: s
     if token_matches(expected, token_from_header(handler)):
         return AuthResult(True, HTTPStatus.OK, "")
     return AuthResult(False, HTTPStatus.UNAUTHORIZED, "unauthorized")
+
+
+def cleanup_dashboard_sessions(now: int | None = None) -> None:
+    current = int(time.time()) if now is None else now
+    expired = [token for token, expires_at in DASHBOARD_SESSIONS.items() if int(expires_at) <= current]
+    for token in expired:
+        DASHBOARD_SESSIONS.pop(token, None)
+
+
+def dashboard_session_valid(provided: str) -> bool:
+    now = int(time.time())
+    cleanup_dashboard_sessions(now)
+    expires_at = DASHBOARD_SESSIONS.get(provided)
+    return bool(provided and expires_at and int(expires_at) > now)
+
+
+def require_dashboard_access(handler: BaseHTTPRequestHandler) -> AuthResult:
+    provided = token_from_header(handler)
+    if DASHBOARD_TOKEN and token_matches(DASHBOARD_TOKEN, provided):
+        return AuthResult(True, HTTPStatus.OK, "")
+    with STATE_LOCK:
+        if dashboard_session_valid(provided):
+            return AuthResult(True, HTTPStatus.OK, "")
+    if DASHBOARD_TOKEN or NTFY_TOPIC:
+        return AuthResult(False, HTTPStatus.UNAUTHORIZED, "unauthorized")
+    return AuthResult(True, HTTPStatus.OK, "")
+
+
+def send_ntfy_message(message: str, title: str) -> None:
+    if not NTFY_TOPIC:
+        raise RuntimeError("RELAY_NTFY_TOPIC is not configured")
+    url = f"{NTFY_URL}/{NTFY_TOPIC}"
+    headers = {
+        "Title": title,
+        "Priority": "high",
+        "Tags": "key",
+        "User-Agent": "SpokenCommandRelay/0.1",
+    }
+    if NTFY_TOKEN:
+        headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
+    request = Request(url, data=message.encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urlopen(request, timeout=8) as response:
+            response.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:240]
+        raise RuntimeError(f"ntfy returned HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"ntfy request failed: {exc.reason}") from exc
+
+
+def request_dashboard_code(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    global DASHBOARD_CODE_LAST_REQUEST_AT
+    now = int(time.time())
+    with STATE_LOCK:
+        if not NTFY_TOPIC:
+            raise RuntimeError("RELAY_NTFY_TOPIC is not configured")
+        if DASHBOARD_CODE_LAST_REQUEST_AT and now - DASHBOARD_CODE_LAST_REQUEST_AT < DASHBOARD_CODE_REQUEST_SECONDS:
+            wait_seconds = DASHBOARD_CODE_REQUEST_SECONDS - (now - DASHBOARD_CODE_LAST_REQUEST_AT)
+            return {"sent": False, "retry_after_seconds": wait_seconds}
+        code = f"{secrets.randbelow(100_000_000):08d}"
+    send_ntfy_message(
+        f"Relay dashboard code: {code}\n\nExpires in {DASHBOARD_CODE_TTL_SECONDS // 60} minutes.",
+        NTFY_TITLE,
+    )
+    with STATE_LOCK:
+        now = int(time.time())
+        DASHBOARD_CODE.clear()
+        DASHBOARD_CODE.update({
+            "hash": hashlib.sha256(code.encode("utf-8")).hexdigest(),
+            "expires_at": now + DASHBOARD_CODE_TTL_SECONDS,
+            "attempts": 0,
+            "requested_by": client_ip(handler),
+        })
+        DASHBOARD_CODE_LAST_REQUEST_AT = now
+    return {"sent": True, "expires_in_seconds": DASHBOARD_CODE_TTL_SECONDS}
+
+
+def verify_dashboard_code(code: str) -> dict[str, Any]:
+    now = int(time.time())
+    cleaned = re.sub(r"\D+", "", code)[:8]
+    if len(cleaned) != 8:
+        raise ValueError("code must be 8 digits")
+    with STATE_LOCK:
+        expected = str(DASHBOARD_CODE.get("hash", ""))
+        expires_at = int(DASHBOARD_CODE.get("expires_at", 0) or 0)
+        attempts = int(DASHBOARD_CODE.get("attempts", 0) or 0)
+        if not expected or expires_at <= now:
+            DASHBOARD_CODE.clear()
+            raise ValueError("code expired")
+        if attempts >= 5:
+            DASHBOARD_CODE.clear()
+            raise ValueError("too many attempts")
+        DASHBOARD_CODE["attempts"] = attempts + 1
+        if not token_matches(expected, hashlib.sha256(cleaned.encode("utf-8")).hexdigest()):
+            raise ValueError("invalid code")
+        DASHBOARD_CODE.clear()
+        session_token = secrets.token_urlsafe(32)
+        expires_at = now + DASHBOARD_SESSION_SECONDS
+        cleanup_dashboard_sessions(now)
+        DASHBOARD_SESSIONS[session_token] = expires_at
+    return {"session_token": session_token, "expires_at": expires_at, "expires_in_seconds": DASHBOARD_SESSION_SECONDS}
 
 
 def load_device_tokens() -> dict[str, str]:
@@ -534,6 +649,7 @@ def relay_snapshot() -> dict[str, Any]:
             "acked_event_count": acked_count,
             "has_sync_token": bool(SYNC_TOKEN),
             "has_dashboard_token": bool(DASHBOARD_TOKEN),
+            "has_dashboard_code_auth": bool(NTFY_TOPIC),
         },
         "devices": devices,
         "recent_events": recent_events,
@@ -614,6 +730,9 @@ DASHBOARD_HTML = """<!doctype html>
     button, input { font: inherit; }
     input { min-width: 260px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
     button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+    .auth-panel { margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+    .auth-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .auth-row input { min-width: 180px; }
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #171a1f;
@@ -651,10 +770,19 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
   </header>
   <main>
-    <form id="auth" hidden>
-      <input id="token" type="password" autocomplete="current-password" placeholder="Dashboard token">
-      <button type="submit">Save</button>
-    </form>
+    <section id="auth" class="auth-panel" hidden>
+      <h2>Dashboard Access</h2>
+      <div class="muted" id="authMessage">Request a temporary code on your phone.</div>
+      <div class="auth-row">
+        <button id="requestCodeButton" type="button">Send Phone Code</button>
+        <input id="code" type="text" inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="8-digit code">
+        <button id="verifyCodeButton" type="button">Verify</button>
+      </div>
+      <form id="tokenAuth" class="auth-row">
+        <input id="token" type="password" autocomplete="current-password" placeholder="Dashboard token">
+        <button type="submit">Save Token</button>
+      </form>
+    </section>
     <section class="grid" id="summary"></section>
     <nav class="tabs" aria-label="Relay dashboard sections">
       <button class="tab-button active" type="button" data-tab="events">Events</button>
@@ -683,7 +811,9 @@ DASHBOARD_HTML = """<!doctype html>
     const tabKey = "draconRelayDashboardTab";
     const statusEl = document.getElementById("status");
     const auth = document.getElementById("auth");
+    const authMessage = document.getElementById("authMessage");
     const token = document.getElementById("token");
+    const code = document.getElementById("code");
     const openHomeDevices = new Set();
 
     function el(tag, className, text) {
@@ -756,10 +886,43 @@ DASHBOARD_HTML = """<!doctype html>
       const saved = localStorage.getItem(tokenKey) || "";
       return saved ? {Authorization: `Bearer ${saved}`} : {};
     }
-    auth.addEventListener("submit", (event) => {
+    document.getElementById("tokenAuth").addEventListener("submit", (event) => {
       event.preventDefault();
       localStorage.setItem(tokenKey, token.value);
       token.value = "";
+      load();
+    });
+    document.getElementById("requestCodeButton").addEventListener("click", async () => {
+      authMessage.textContent = "Sending code...";
+      const response = await fetch("/dashboard-auth/request", {method: "POST", cache: "no-store"});
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        authMessage.textContent = payload.error || `Failed to send code: HTTP ${response.status}`;
+        return;
+      }
+      if (payload.sent === false) {
+        authMessage.textContent = `Code was requested recently. Try again in ${payload.retry_after_seconds || 60}s.`;
+        return;
+      }
+      authMessage.textContent = `Code sent. It expires in ${payload.expires_in_seconds || 300}s.`;
+      code.focus();
+    });
+    document.getElementById("verifyCodeButton").addEventListener("click", async () => {
+      authMessage.textContent = "Verifying code...";
+      const response = await fetch("/dashboard-auth/verify", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({code: code.value}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        authMessage.textContent = payload.error || `Failed to verify code: HTTP ${response.status}`;
+        return;
+      }
+      localStorage.setItem(tokenKey, payload.session_token);
+      code.value = "";
+      authMessage.textContent = "Access granted.";
       load();
     });
     function render(data) {
@@ -970,11 +1133,10 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/dashboard-data":
-            if DASHBOARD_TOKEN:
-                auth = require_static_token(self, DASHBOARD_TOKEN, "dashboard")
-                if not auth.ok:
-                    auth_error(self, auth)
-                    return
+            auth = require_dashboard_access(self)
+            if not auth.ok:
+                auth_error(self, auth)
+                return
             with STATE_LOCK:
                 payload = relay_snapshot()
             json_response(self, 200, payload)
@@ -1025,6 +1187,25 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+
+        if parsed.path == "/dashboard-auth/request":
+            try:
+                payload = request_dashboard_code(self)
+                json_response(self, 200, {"ok": True, **payload})
+            except Exception as exc:
+                json_response(self, 503, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/dashboard-auth/verify":
+            try:
+                payload = read_json_body(self)
+                session = verify_dashboard_code(str(payload.get("code", "")))
+                json_response(self, 200, {"ok": True, **session})
+            except ValueError as exc:
+                json_response(self, 401, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
 
         if parsed.path.startswith("/devices/") and parsed.path.endswith("/register"):
             device_id = clean_id(parsed.path.removeprefix("/devices/").removesuffix("/register"))
