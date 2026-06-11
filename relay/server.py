@@ -573,6 +573,42 @@ def queue_button_event(device_id: str, payload: dict[str, Any], handler: BaseHTT
     return enqueue_event(device_id, "button", event)
 
 
+def clean_mission_task_type(value: str) -> str:
+    cleaned = str(value).strip().lower()
+    if cleaned in {"daily", "today"}:
+        return "daily"
+    return "persistent"
+
+
+def queue_mission_task_create(payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    title = re.sub(r"\s+", " ", str(payload.get("title", "")).strip())[:160]
+    if not title:
+        raise ValueError("title is required")
+    task_type = clean_mission_task_type(str(payload.get("task_type", "persistent")))
+    due_date = str(payload.get("due_date", "")).strip()[:10]
+    event = {
+        "title": title,
+        "notes": str(payload.get("notes", ""))[:1000],
+        "task_type": task_type,
+        "due_date": due_date,
+        "created_by": "relay-dashboard",
+        "remote_addr": client_ip(handler),
+    }
+    return enqueue_event("relay-dashboard", "mission_task_create", event)
+
+
+def queue_mission_task_complete(payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    task_id = clean_id(str(payload.get("id", "")))
+    if not task_id:
+        raise ValueError("task id is required")
+    event = {
+        "id": task_id,
+        "completed_by": "relay-dashboard",
+        "remote_addr": client_ip(handler),
+    }
+    return enqueue_event("relay-dashboard", "mission_task_complete", event)
+
+
 def pending_events(limit: int) -> list[dict[str, Any]]:
     now = int(time.time())
     lease_cutoff = now - EVENT_LEASE_SECONDS
@@ -760,7 +796,12 @@ DASHBOARD_HTML = """<!doctype html>
     code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     button, input { font: inherit; }
     input { min-width: 260px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+    select, textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+    textarea { min-height: 72px; resize: vertical; }
     button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+    .action-form { display: grid; gap: 8px; }
+    .form-grid { display: grid; grid-template-columns: minmax(180px, 1fr) 150px 160px; gap: 8px; }
+    .form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .auth-panel { margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
     .auth-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     .auth-row input { min-width: 180px; }
@@ -786,6 +827,7 @@ DASHBOARD_HTML = """<!doctype html>
       .header-inner { align-items: flex-start; flex-direction: column; }
       .top-status { justify-content: flex-start; text-align: left; }
       main { padding-inline: 14px; }
+      .form-grid { grid-template-columns: 1fr; }
       .row-head, .section-title { align-items: flex-start; flex-direction: column; }
     }
   </style>
@@ -820,12 +862,34 @@ DASHBOARD_HTML = """<!doctype html>
     <section class="grid" id="summary"></section>
     <nav class="tabs" aria-label="Relay dashboard sections">
       <button class="tab-button active" type="button" data-tab="events">Events</button>
+      <button class="tab-button" type="button" data-tab="mission">Mission</button>
       <button class="tab-button" type="button" data-tab="devices">Devices</button>
       <button class="tab-button" type="button" data-tab="uptime">Uptime</button>
     </nav>
     <section class="tab-panel active" data-tab-panel="events">
       <div class="section-title"><h2>Recent Relay Events</h2><span class="muted" id="relayEventCount"></span></div>
       <section class="rows" id="events"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="mission">
+      <div class="section-title"><h2>Mission Board</h2><span class="muted" id="missionCount"></span></div>
+      <div class="row">
+        <form class="action-form" id="missionForm">
+          <div class="form-grid">
+            <input id="missionTitle" type="text" placeholder="Task title" autocomplete="off">
+            <select id="missionType">
+              <option value="persistent">Persistent</option>
+              <option value="daily">Today only</option>
+            </select>
+            <input id="missionDueDate" type="date">
+          </div>
+          <textarea id="missionNotes" placeholder="Notes, optional"></textarea>
+          <div class="form-actions">
+            <button type="submit">Add Task</button>
+            <span class="muted" id="missionFormResult"></span>
+          </div>
+        </form>
+      </div>
+      <section class="rows" id="missionTasks"></section>
     </section>
     <section class="tab-panel" data-tab-panel="devices">
       <div class="section-title"><h2>Remote Devices</h2><span class="muted" id="remoteDeviceCount"></span></div>
@@ -921,15 +985,21 @@ DASHBOARD_HTML = """<!doctype html>
       const saved = localStorage.getItem(tokenKey) || "";
       return saved ? {Authorization: `Bearer ${saved}`} : {};
     }
+    function todayText() {
+      const now = new Date();
+      const month = String(now.getMonth() + 1).padStart(2, "0");
+      const day = String(now.getDate()).padStart(2, "0");
+      return `${now.getFullYear()}-${month}-${day}`;
+    }
     function setAuthenticated(authenticated) {
       auth.hidden = authenticated;
       logoutButton.hidden = !authenticated;
     }
     function clearDashboard() {
-      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors"]) {
+      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks"]) {
         clear(document.getElementById(id));
       }
-      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount"]) {
+      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "missionFormResult"]) {
         document.getElementById(id).textContent = "";
       }
     }
@@ -979,6 +1049,84 @@ DASHBOARD_HTML = """<!doctype html>
       authMessage.textContent = "Request a temporary code on your phone.";
       setAuthenticated(false);
     });
+    async function createMissionTask(event) {
+      event.preventDefault();
+      const result = document.getElementById("missionFormResult");
+      const taskType = document.getElementById("missionType").value;
+      const payload = {
+        title: document.getElementById("missionTitle").value,
+        notes: document.getElementById("missionNotes").value,
+        task_type: taskType,
+        due_date: taskType === "daily" ? (document.getElementById("missionDueDate").value || todayText()) : "",
+      };
+      result.textContent = "Queuing...";
+      const response = await fetch("/mission-board/tasks", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json", ...authHeaders()},
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) {
+        result.textContent = data.error || `Failed: HTTP ${response.status}`;
+        return;
+      }
+      document.getElementById("missionTitle").value = "";
+      document.getElementById("missionNotes").value = "";
+      result.textContent = "Queued for home sync.";
+      load();
+    }
+    async function completeMissionTask(taskId, button) {
+      button.disabled = true;
+      button.textContent = "Queuing...";
+      const response = await fetch(`/mission-board/tasks/${encodeURIComponent(taskId)}/complete`, {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json", ...authHeaders()},
+        body: JSON.stringify({completed_by: "relay-dashboard"}),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) {
+        button.disabled = false;
+        button.textContent = data.error || "Failed";
+        return;
+      }
+      button.textContent = "Queued";
+      load();
+    }
+    function renderMissionBoard(homePayload) {
+      const root = document.getElementById("missionTasks");
+      clear(root);
+      const board = homePayload.mission_board || {};
+      const tasks = Array.isArray(board.tasks) ? board.tasks : [];
+      document.getElementById("missionCount").textContent = `${tasks.length} active`;
+      document.getElementById("missionDueDate").value = board.today || todayText();
+      if (!tasks.length) {
+        root.append(el("div", "row muted", "No active mission tasks."));
+        return;
+      }
+      for (const task of tasks) {
+        const row = el("div", "row");
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", task.title || "Untitled task"));
+        const detail = task.task_type === "daily" ? `today only · ${task.due_date || board.today || ""}` : "persistent";
+        title.append(el("div", "muted meta-line", detail));
+        head.append(title);
+        const done = el("button", "", "Complete");
+        done.type = "button";
+        done.addEventListener("click", () => completeMissionTask(task.id, done));
+        head.append(done);
+        row.append(head);
+        if (task.notes) row.append(el("div", "muted meta-line", task.notes));
+        const meta = el("div", "device-meta");
+        meta.append(kv("ID", task.id));
+        meta.append(kv("Created", timeText(task.created_at)));
+        meta.append(kv("Source", task.source));
+        row.append(meta);
+        root.append(row);
+      }
+    }
     function render(data) {
       setAuthenticated(true);
       statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -1070,6 +1218,7 @@ DASHBOARD_HTML = """<!doctype html>
       const homeDevices = document.getElementById("homeDevices");
       clear(homeDevices);
       const homePayload = data.home?.payload || {};
+      renderMissionBoard(homePayload);
       const devicesFromHome = Array.isArray(homePayload.devices) ? homePayload.devices : [];
       document.getElementById("homeDeviceCount").textContent = `${devicesFromHome.length} in snapshot`;
       if (!devicesFromHome.length) {
@@ -1160,6 +1309,8 @@ DASHBOARD_HTML = """<!doctype html>
       }
       render(await response.json());
     }
+    document.getElementById("missionForm").addEventListener("submit", createMissionTask);
+    document.getElementById("missionDueDate").value = todayText();
     initTabs();
     load();
     setInterval(load, 5000);
@@ -1260,6 +1411,36 @@ class RelayHandler(BaseHTTPRequestHandler):
                 json_response(self, 401, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/mission-board/tasks":
+            auth = require_dashboard_access(self)
+            if not auth.ok:
+                auth_error(self, auth)
+                return
+            try:
+                payload = read_json_body(self)
+                with STATE_LOCK:
+                    event = queue_mission_task_create(payload, self)
+                json_response(self, 202, {"ok": True, "relay_event": event})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path.startswith("/mission-board/tasks/") and parsed.path.endswith("/complete"):
+            auth = require_dashboard_access(self)
+            if not auth.ok:
+                auth_error(self, auth)
+                return
+            task_id = clean_id(parsed.path.removeprefix("/mission-board/tasks/").removesuffix("/complete"))
+            try:
+                payload = read_json_body(self)
+                payload["id"] = task_id
+                with STATE_LOCK:
+                    event = queue_mission_task_complete(payload, self)
+                json_response(self, 202, {"ok": True, "relay_event": event})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
             return
 
         if parsed.path.startswith("/devices/") and parsed.path.endswith("/register"):

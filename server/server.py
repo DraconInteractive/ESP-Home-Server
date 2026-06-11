@@ -67,6 +67,10 @@ UPTIME_MONITORS_PATH = os.environ.get(
     "COMMAND_SERVER_UPTIME_MONITORS_PATH",
     os.path.join(os.path.dirname(__file__), "uptime-monitors.json"),
 )
+MISSION_BOARD_PATH = os.environ.get(
+    "COMMAND_SERVER_MISSION_BOARD_PATH",
+    os.path.join(os.path.dirname(__file__), "mission-board.json"),
+)
 DATABASE_PATH = os.environ.get(
     "COMMAND_SERVER_DATABASE_PATH",
     os.path.join(os.path.dirname(__file__), "server-state.sqlite3"),
@@ -101,6 +105,7 @@ RECENT_BUTTON_EVENTS: list[dict[str, Any]] = []
 RECENT_RULE_RUNS: list[dict[str, Any]] = []
 ACTIVE_TIMERS: dict[str, dict[str, Any]] = {}
 UPTIME_MONITORS: dict[str, dict[str, Any]] = {}
+MISSION_TASKS: dict[str, dict[str, Any]] = {}
 LOW_BATTERY_NOTIFIED: set[str] = set()
 MUTED_DEVICES: dict[str, bool] = {}
 GLOBAL_MUTED = False
@@ -1041,6 +1046,143 @@ def clean_rule_type(value: str) -> str:
     return cleaned[:40] or "button"
 
 
+def clean_mission_task_type(value: str) -> str:
+    cleaned = str(value).strip().lower()
+    if cleaned in {"daily", "today"}:
+        return "daily"
+    return "persistent"
+
+
+def clean_mission_title(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value).strip())
+    if not cleaned:
+        raise ValueError("title is required")
+    return cleaned[:160]
+
+
+def local_date_text(timestamp: int | None = None) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(timestamp or int(time.time())))
+
+
+def public_mission_task(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": task.get("id", ""),
+        "title": task.get("title", ""),
+        "notes": task.get("notes", ""),
+        "task_type": task.get("task_type", "persistent"),
+        "status": task.get("status", "open"),
+        "created_at": task.get("created_at", 0),
+        "due_date": task.get("due_date"),
+        "completed_at": task.get("completed_at"),
+        "completed_by": task.get("completed_by", ""),
+        "source": task.get("source", ""),
+    }
+
+
+def active_mission_tasks() -> list[dict[str, Any]]:
+    today = local_date_text()
+    active: list[dict[str, Any]] = []
+    for task in MISSION_TASKS.values():
+        if task.get("status") == "completed":
+            continue
+        task_type = str(task.get("task_type", "persistent"))
+        if task_type == "daily" and str(task.get("due_date", "")) != today:
+            continue
+        active.append(public_mission_task(task))
+    return sorted(active, key=lambda item: (str(item.get("task_type") or ""), int(item.get("created_at") or 0), str(item.get("title") or "")))
+
+
+def mission_board_summary() -> dict[str, Any]:
+    tasks = active_mission_tasks()
+    return {
+        "today": local_date_text(),
+        "tasks": tasks,
+        "total_active": len(tasks),
+        "persistent_count": sum(1 for task in tasks if task.get("task_type") == "persistent"),
+        "daily_count": sum(1 for task in tasks if task.get("task_type") == "daily"),
+    }
+
+
+def save_mission_tasks() -> None:
+    directory = os.path.dirname(MISSION_BOARD_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = {"tasks": [MISSION_TASKS[task_id] for task_id in sorted(MISSION_TASKS)]}
+    temp_path = f"{MISSION_BOARD_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, MISSION_BOARD_PATH)
+
+
+def load_mission_tasks() -> None:
+    try:
+        with open(MISSION_BOARD_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load mission board: {exc}")
+        return
+    for raw in payload.get("tasks", []) if isinstance(payload, dict) else []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            task_id = clean_rule_id(str(raw.get("id", "")) or uuid.uuid4().hex)
+            title = clean_mission_title(str(raw.get("title", "")))
+        except Exception:
+            continue
+        task_type = clean_mission_task_type(str(raw.get("task_type", "persistent")))
+        MISSION_TASKS[task_id] = {
+            "id": task_id,
+            "title": title,
+            "notes": str(raw.get("notes", ""))[:1000],
+            "task_type": task_type,
+            "status": "completed" if raw.get("status") == "completed" else "open",
+            "created_at": int(raw.get("created_at", int(time.time())) or int(time.time())),
+            "due_date": str(raw.get("due_date", ""))[:10] if task_type == "daily" else None,
+            "completed_at": raw.get("completed_at"),
+            "completed_by": str(raw.get("completed_by", ""))[:80],
+            "source": str(raw.get("source", ""))[:80],
+        }
+
+
+def create_mission_task(payload: dict[str, Any], source: str = "local") -> dict[str, Any]:
+    now = int(time.time())
+    task_type = clean_mission_task_type(str(payload.get("task_type", "persistent")))
+    due_date = str(payload.get("due_date", "")).strip()[:10]
+    if task_type == "daily" and not re.match(r"^\d{4}-\d{2}-\d{2}$", due_date):
+        due_date = local_date_text(now)
+    task_id = clean_rule_id(str(payload.get("id", "")) or uuid.uuid4().hex)
+    task = {
+        "id": task_id,
+        "title": clean_mission_title(str(payload.get("title", ""))),
+        "notes": str(payload.get("notes", ""))[:1000],
+        "task_type": task_type,
+        "status": "open",
+        "created_at": now,
+        "due_date": due_date if task_type == "daily" else None,
+        "completed_at": None,
+        "completed_by": "",
+        "source": source[:80],
+    }
+    MISSION_TASKS[task_id] = task
+    save_mission_tasks()
+    return public_mission_task(task)
+
+
+def complete_mission_task(task_id: str, completed_by: str = "") -> dict[str, Any]:
+    cleaned_id = clean_rule_id(task_id)
+    task = MISSION_TASKS.get(cleaned_id)
+    if not task:
+        raise ValueError("mission task not found")
+    task["status"] = "completed"
+    task["completed_at"] = int(time.time())
+    task["completed_by"] = str(completed_by or "dashboard")[:80]
+    save_mission_tasks()
+    return public_mission_task(task)
+
+
 def clean_rule_step(raw_step: dict[str, Any]) -> dict[str, Any]:
     action_type = str(raw_step.get("action_type", raw_step.get("type", "transcript")))[:40]
     return {
@@ -1776,6 +1918,7 @@ def dashboard_snapshot() -> dict[str, Any]:
         "rules": [public_rule(rule_id, EVENT_RULES[rule_id]) for rule_id in sorted(EVENT_RULES)],
         "recent_rule_runs": RECENT_RULE_RUNS[-20:],
         "uptime_monitors": [public_uptime_monitor(UPTIME_MONITORS[monitor_id]) for monitor_id in sorted(UPTIME_MONITORS)],
+        "mission_board": mission_board_summary(),
         "active_timers": active_timer_summary(),
         "devices": devices,
         "recent_commands": RECENT_COMMANDS[-20:],
@@ -1794,6 +1937,7 @@ def external_dashboard_snapshot() -> dict[str, Any]:
         "summary": snapshot.get("summary", {}),
         "devices": [],
         "uptime_monitors": snapshot.get("uptime_monitors", []),
+        "mission_board": snapshot.get("mission_board", {}),
         "recent_button_events": snapshot.get("recent_button_events", []),
         "recent_rule_runs": snapshot.get("recent_rule_runs", []),
     }
@@ -1886,6 +2030,12 @@ def process_relay_event(event: dict[str, Any]) -> None:
         return
     if event_type == "button":
         record_button_event(device_id, payload, source="relay")
+        return
+    if event_type == "mission_task_create":
+        create_mission_task(payload, source="relay")
+        return
+    if event_type == "mission_task_complete":
+        complete_mission_task(str(payload.get("id", "")), completed_by=str(payload.get("completed_by", "relay")))
         return
     raise ValueError(f"unsupported relay event type: {event_type}")
 
@@ -5321,6 +5471,11 @@ class CommandHandler(BaseHTTPRequestHandler):
                 payload = {"monitors": [public_uptime_monitor(UPTIME_MONITORS[monitor_id]) for monitor_id in sorted(UPTIME_MONITORS)]}
             json_response(self, 200, payload)
             return
+        if parsed.path == "/mission-board":
+            with STATE_LOCK:
+                payload = mission_board_summary()
+            json_response(self, 200, payload)
+            return
         if parsed.path == "/events/recent":
             with STATE_LOCK:
                 payload = {"recent_rule_runs": RECENT_RULE_RUNS[-20:]}
@@ -5457,6 +5612,30 @@ class CommandHandler(BaseHTTPRequestHandler):
                 payload = dict(device_response)
                 payload["simulated"] = True
                 json_response(self, 200 if payload.get("ok") else 400, payload)
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/mission-board/tasks":
+            try:
+                payload = read_optional_json_body(self)
+                with STATE_LOCK:
+                    task = create_mission_task(payload, source="local")
+                    board = mission_board_summary()
+                json_response(self, 200, {"ok": True, "task": task, "mission_board": board})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path.startswith("/mission-board/tasks/") and parsed.path.endswith("/complete"):
+            task_id = clean_rule_id(parsed.path.removeprefix("/mission-board/tasks/").removesuffix("/complete"))
+            try:
+                payload = read_optional_json_body(self)
+                completed_by = str(payload.get("completed_by", "local"))
+                with STATE_LOCK:
+                    task = complete_mission_task(task_id, completed_by=completed_by)
+                    board = mission_board_summary()
+                json_response(self, 200, {"ok": True, "task": task, "mission_board": board})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
@@ -5811,6 +5990,7 @@ def main() -> None:
     load_event_rules()
     load_timers()
     load_uptime_monitors()
+    load_mission_tasks()
     threading.Thread(target=timer_worker, name="timer-worker", daemon=True).start()
     threading.Thread(target=uptime_worker, name="uptime-worker", daemon=True).start()
     if RELAY_ENABLED:

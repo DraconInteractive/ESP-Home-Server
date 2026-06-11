@@ -101,6 +101,7 @@ When enabled, the local server:
 - polls `/sync/events` for pending remote device events
 - converts remote `register` events into local device registrations
 - converts remote `button` events into the existing local event-rule flow
+- converts remote mission-board events into local task creates/completions
 - acks each relay event after processing
 
 The pushed dashboard snapshot deliberately omits local action controls, command
@@ -114,6 +115,10 @@ simulation, firmware upload paths, and media proxy endpoints.
 - `GET /dashboard-data` returns the dashboard snapshot used by the UI.
   The dashboard includes startup diagnostics, active timers, and packaged
   action test controls.
+- `GET /mission-board` returns active mission-board tasks. Persistent tasks stay
+  active until completed; daily tasks are active only on their local `due_date`.
+- `POST /mission-board/tasks` creates a mission-board task.
+- `POST /mission-board/tasks/{task_id}/complete` completes a mission-board task.
 - `GET /health` returns a basic health check.
 - `GET /actions` returns the configured packaged server actions.
 - `POST /actions/{action_name}/run` runs a configured action. If an action is

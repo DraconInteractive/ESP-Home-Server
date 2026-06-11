@@ -77,6 +77,8 @@ Dashboard:
 ```text
 GET /dashboard
 GET /dashboard-data
+POST /mission-board/tasks
+POST /mission-board/tasks/{task_id}/complete
 ```
 
 If `RELAY_DASHBOARD_TOKEN` is set, `/dashboard-data` requires:
@@ -101,6 +103,10 @@ RELAY_DASHBOARD_SESSION_SECONDS=43200
 When enabled, the dashboard login screen can request a phone code, verify it,
 and store a temporary session token in browser local storage. The long dashboard
 token remains valid as a fallback.
+
+Mission-board posts require dashboard access. They enqueue events for the home
+server; the home server remains the canonical owner of task state and publishes
+the active board back in the dashboard snapshot.
 
 Remote devices:
 
