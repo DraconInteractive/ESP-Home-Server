@@ -3700,6 +3700,7 @@ DASHBOARD_HTML = """<!doctype html>
   </header>
   <nav class="tabs" aria-label="Dashboard sections">
     <button class="tab-button active" type="button" data-tab="overview">Overview</button>
+    <button class="tab-button" type="button" data-tab="mission">Mission</button>
     <button class="tab-button" type="button" data-tab="devices">Devices</button>
     <button class="tab-button" type="button" data-tab="events">Events</button>
     <button class="tab-button" type="button" data-tab="uptime">Uptime</button>
@@ -3760,6 +3761,30 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
         </div>
       </section>
+    </section>
+    <section class="tab-panel" data-tab-panel="mission">
+      <div class="panel">
+        <h2>Mission Board</h2>
+        <div class="events">
+          <div class="event">
+            <div class="device-id">Create task</div>
+            <form class="action-form" id="missionForm">
+              <input id="missionTitle" type="text" placeholder="Task title" autocomplete="off">
+              <select id="missionType">
+                <option value="persistent">Persistent</option>
+                <option value="daily">Today only</option>
+              </select>
+              <input id="missionDueDate" type="date">
+              <textarea id="missionNotes" placeholder="Notes, optional"></textarea>
+              <div class="action-row">
+                <button type="submit">Add</button>
+                <span class="meta" id="missionFormResult"></span>
+              </div>
+            </form>
+          </div>
+        </div>
+        <div class="events" id="missionTasks"></div>
+      </div>
     </section>
     <section class="tab-panel" data-tab-panel="devices">
       <div class="panel">
@@ -4592,6 +4617,88 @@ DASHBOARD_HTML = """<!doctype html>
       select.value = Array.from(select.options).some((option) => option.value === current) ? current : "dashboard";
     }
 
+    function todayText() {
+      const now = new Date();
+      const month = String(now.getMonth() + 1).padStart(2, "0");
+      const day = String(now.getDate()).padStart(2, "0");
+      return `${now.getFullYear()}-${month}-${day}`;
+    }
+
+    async function createMissionTask(event) {
+      event.preventDefault();
+      const result = document.getElementById("missionFormResult");
+      const taskType = document.getElementById("missionType").value;
+      const payload = {
+        title: document.getElementById("missionTitle").value,
+        notes: document.getElementById("missionNotes").value,
+        task_type: taskType,
+        due_date: taskType === "daily" ? (document.getElementById("missionDueDate").value || todayText()) : "",
+      };
+      try {
+        const response = await fetch("/mission-board/tasks", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        document.getElementById("missionTitle").value = "";
+        document.getElementById("missionNotes").value = "";
+        result.textContent = "Added";
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        await refresh();
+      } catch (error) {
+        result.textContent = error.message;
+      }
+    }
+
+    async function completeMissionTask(taskId, button) {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Completing";
+      try {
+        const response = await fetch(`/mission-board/tasks/${encodeURIComponent(taskId)}/complete`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({completed_by: "home-dashboard"}),
+        });
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        await refresh();
+      } catch (error) {
+        button.textContent = "Failed";
+        setTimeout(() => { button.textContent = original; button.disabled = false; }, 1200);
+        return;
+      }
+      button.textContent = original;
+      button.disabled = false;
+    }
+
+    function renderMissionBoard(board) {
+      const root = document.getElementById("missionTasks");
+      root.replaceChildren();
+      const tasks = Array.isArray(board?.tasks) ? board.tasks : [];
+      document.getElementById("missionDueDate").value = board?.today || todayText();
+      if (!tasks.length) {
+        root.append(el("div", "empty", "No active mission tasks."));
+        return;
+      }
+      for (const task of tasks) {
+        const item = el("div", "event");
+        item.append(el("div", "device-id", text(task.title)));
+        item.append(el("div", "meta", task.task_type === "daily" ? `today only | ${text(task.due_date)}` : "persistent"));
+        if (task.notes) item.append(el("div", "", text(task.notes)));
+        item.append(el("div", "meta", `${text(task.id)} | source ${text(task.source)} | created ${new Date((task.created_at || 0) * 1000).toLocaleString()}`));
+        const row = el("div", "action-row");
+        const complete = el("button", "", "Complete");
+        complete.type = "button";
+        complete.addEventListener("click", () => completeMissionTask(task.id, complete));
+        row.append(complete);
+        item.append(row);
+        root.append(item);
+      }
+    }
+
     async function createTimer(event) {
       event.preventDefault();
       const result = document.getElementById("timerFormResult");
@@ -4992,6 +5099,7 @@ DASHBOARD_HTML = """<!doctype html>
       renderDiagnostics(data.server.diagnostics);
       renderActions(data.actions);
       renderRules(data.rules, data.devices, data.actions, data.recent_rule_runs);
+      renderMissionBoard(data.mission_board);
       renderTimers(data.active_timers, data.devices);
       renderUptimeMonitors(data.uptime_monitors);
       state.devices = data.devices || [];
@@ -5035,6 +5143,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshButton").addEventListener("click", refresh);
     document.getElementById("simulateButton").addEventListener("click", simulateTranscript);
     document.getElementById("restartButton").addEventListener("click", restartServer);
+    document.getElementById("missionForm").addEventListener("submit", createMissionTask);
+    document.getElementById("missionDueDate").value = todayText();
     document.getElementById("timerForm").addEventListener("submit", createTimer);
     document.getElementById("uptimeForm").addEventListener("submit", createUptimeMonitor);
     document.getElementById("uptimeCancelEditButton").addEventListener("click", resetUptimeForm);

@@ -795,8 +795,9 @@ DASHBOARD_HTML = """<!doctype html>
     pre { margin: 8px 0 0; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .8rem; background: var(--panel-soft); border: 1px solid var(--border); border-radius: 6px; padding: 10px; }
     code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     button, input { font: inherit; }
-    input { min-width: 260px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
-    select, textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+    input { min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+    select, textarea { min-width: 0; font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+    #token { min-width: 260px; }
     textarea { min-height: 72px; resize: vertical; }
     button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
     .action-form { display: grid; gap: 8px; }
