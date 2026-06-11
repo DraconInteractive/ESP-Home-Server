@@ -51,6 +51,7 @@ DASHBOARD_SESSION_SECONDS = int(os.environ.get("RELAY_DASHBOARD_SESSION_SECONDS"
 EVENT_LEASE_SECONDS = int(os.environ.get("RELAY_EVENT_LEASE_SECONDS", "60"))
 MAX_JSON_BYTES = int(os.environ.get("RELAY_MAX_JSON_BYTES", str(256 * 1024)))
 RECENT_LIMIT = int(os.environ.get("RELAY_RECENT_LIMIT", "50"))
+MAX_EVENT_ROWS = int(os.environ.get("RELAY_MAX_EVENT_ROWS", "50000"))
 SERVER_STARTED_AT = int(time.time())
 
 STATE_LOCK = threading.RLock()
@@ -112,6 +113,10 @@ def init_database() -> None:
         connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_pending
             ON events(acked_at, delivered_at, received_at)
+        """)
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_recent
+            ON events(received_at DESC)
         """)
         connection.execute("""
             CREATE TABLE IF NOT EXISTS dashboard_snapshots (
@@ -513,6 +518,28 @@ def dirty_device_statuses(limit: int = 100) -> list[dict[str, Any]]:
     return devices
 
 
+def prune_acked_events(connection: sqlite3.Connection) -> int:
+    if MAX_EVENT_ROWS <= 0:
+        return 0
+    total = connection.execute("SELECT count(*) AS count FROM events").fetchone()["count"]
+    excess = int(total) - MAX_EVENT_ROWS
+    if excess <= 0:
+        return 0
+    cursor = connection.execute(
+        """
+        DELETE FROM events
+        WHERE id IN (
+            SELECT id FROM events
+            WHERE acked_at IS NOT NULL
+            ORDER BY received_at ASC
+            LIMIT ?
+        )
+        """,
+        (excess,),
+    )
+    return cursor.rowcount
+
+
 def enqueue_event(device_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     event_id = uuid.uuid4().hex
     now = int(time.time())
@@ -525,6 +552,7 @@ def enqueue_event(device_id: str, event_type: str, payload: dict[str, Any]) -> d
             (event_id, now, device_id, event_type, json.dumps(payload, separators=(",", ":"))),
         )
         row = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+        prune_acked_events(connection)
     return row_event(row)
 
 
@@ -590,7 +618,10 @@ def ack_event(event_id: str, payload: dict[str, Any]) -> bool:
             """,
             (now, 1 if ok else 0, error, event_id),
         )
-        return cursor.rowcount > 0
+        found = cursor.rowcount > 0
+        if found:
+            prune_acked_events(connection)
+        return found
 
 
 def store_dashboard_snapshot(payload: dict[str, Any]) -> None:

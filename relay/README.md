@@ -188,6 +188,11 @@ relay-state.sqlite3
 The database contains remote devices, queued events, ack status, and the latest
 home dashboard snapshot.
 
+Event retention is size-based. By default, `RELAY_MAX_EVENT_ROWS=50000`. When
+the events table exceeds that count, the relay deletes acked events oldest-first
+until the table is back under the limit. Unacked events are never pruned by this
+retention pass.
+
 ## Updating The VPS From Git
 
 Keep `/opt/spoken-command-relay` as the runtime directory. It contains
