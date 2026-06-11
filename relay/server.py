@@ -690,7 +690,7 @@ DASHBOARD_HTML = """<!doctype html>
     h1 { margin: 0; font-size: 1.35rem; }
     h2 { margin: 0; font-size: 1rem; }
     .muted { color: var(--muted); font-size: .88rem; }
-    .top-status { text-align: right; white-space: nowrap; }
+    .top-status { display: flex; align-items: center; justify-content: flex-end; gap: 8px; text-align: right; white-space: nowrap; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 16px; }
     .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 20px 0 0; border-bottom: 1px solid var(--border); }
     .tab-button { border-bottom: 0; border-radius: 6px 6px 0 0; color: var(--muted); }
@@ -753,7 +753,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
     @media (max-width: 680px) {
       .header-inner { align-items: flex-start; flex-direction: column; }
-      .top-status { text-align: left; }
+      .top-status { justify-content: flex-start; text-align: left; }
       main { padding-inline: 14px; }
       .row-head, .section-title { align-items: flex-start; flex-direction: column; }
     }
@@ -766,7 +766,10 @@ DASHBOARD_HTML = """<!doctype html>
         <h1>Dracon Relay</h1>
         <div class="muted">Public relay and home sync status</div>
       </div>
-      <div id="status" class="muted top-status">Loading...</div>
+      <div class="muted top-status">
+        <span id="status">Loading...</span>
+        <button id="logoutButton" type="button" hidden>Logout</button>
+      </div>
     </div>
   </header>
   <main>
@@ -814,6 +817,7 @@ DASHBOARD_HTML = """<!doctype html>
     const authMessage = document.getElementById("authMessage");
     const token = document.getElementById("token");
     const code = document.getElementById("code");
+    const logoutButton = document.getElementById("logoutButton");
     const openHomeDevices = new Set();
 
     function el(tag, className, text) {
@@ -886,6 +890,18 @@ DASHBOARD_HTML = """<!doctype html>
       const saved = localStorage.getItem(tokenKey) || "";
       return saved ? {Authorization: `Bearer ${saved}`} : {};
     }
+    function setAuthenticated(authenticated) {
+      auth.hidden = authenticated;
+      logoutButton.hidden = !authenticated;
+    }
+    function clearDashboard() {
+      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors"]) {
+        clear(document.getElementById(id));
+      }
+      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount"]) {
+        document.getElementById(id).textContent = "";
+      }
+    }
     document.getElementById("tokenAuth").addEventListener("submit", (event) => {
       event.preventDefault();
       localStorage.setItem(tokenKey, token.value);
@@ -925,7 +941,15 @@ DASHBOARD_HTML = """<!doctype html>
       authMessage.textContent = "Access granted.";
       load();
     });
+    logoutButton.addEventListener("click", () => {
+      localStorage.removeItem(tokenKey);
+      clearDashboard();
+      statusEl.textContent = "Logged out.";
+      authMessage.textContent = "Request a temporary code on your phone.";
+      setAuthenticated(false);
+    });
     function render(data) {
+      setAuthenticated(true);
       statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
       const summary = document.getElementById("summary");
       clear(summary);
@@ -1092,11 +1116,11 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
     async function load() {
-      auth.hidden = true;
       const response = await fetch("/dashboard-data", {cache: "no-store", headers: authHeaders()});
       if (response.status === 401) {
         statusEl.textContent = "Dashboard token required.";
-        auth.hidden = false;
+        clearDashboard();
+        setAuthenticated(false);
         return;
       }
       if (!response.ok) {
