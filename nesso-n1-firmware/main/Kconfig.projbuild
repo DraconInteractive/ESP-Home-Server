@@ -12,6 +12,19 @@ config NESSO_N1_WIFI_PASSWORD
     help
         Home Wi-Fi password. Leave empty for an open network.
 
+config NESSO_N1_WIFI_SECONDARY_SSID
+    string "Secondary Wi-Fi SSID"
+    default ""
+    help
+        Optional fallback Wi-Fi network SSID. The device tries this after the
+        primary network fails.
+
+config NESSO_N1_WIFI_SECONDARY_PASSWORD
+    string "Secondary Wi-Fi password"
+    default ""
+    help
+        Optional fallback Wi-Fi password. Leave empty for an open network.
+
 config NESSO_N1_SERVER_URL
     string "Command server base URL"
     default "http://192.168.4.20:8080"

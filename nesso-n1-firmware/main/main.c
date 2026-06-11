@@ -30,7 +30,7 @@
 
 static const char *TAG = "nesso_n1";
 #define FIRMWARE_PROJECT "nesso-n1-firmware"
-#define FIRMWARE_VERSION "0.0.3d"
+#define FIRMWARE_VERSION "0.0.4d"
 #define FIRMWARE_DEVICE_TYPE "arduino-nesso-n1"
 
 #define LCD_HOST SPI2_HOST
@@ -87,6 +87,8 @@ static const char *TAG = "nesso_n1";
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
 #define WIFI_MAX_RETRIES 5
+#define WIFI_CONNECT_TIMEOUT_MS 12000
+#define MENU_LONG_PRESS_US (1200LL * 1000LL)
 #define REGISTER_INTERVAL_US (60LL * 60LL * 1000LL * 1000LL)
 #define REGISTER_RETRY_INTERVAL_US (30LL * 1000LL * 1000LL)
 #define STATUS_INTERVAL_US (30LL * 1000LL * 1000LL)
@@ -108,11 +110,33 @@ typedef struct {
     int length;
 } http_response_t;
 
+typedef struct {
+    const char *name;
+    const char *ssid;
+    const char *password;
+} wifi_profile_t;
+
+typedef enum {
+    UI_HOME,
+    UI_MENU,
+    UI_RECONNECTING,
+} ui_mode_t;
+
+typedef enum {
+    MENU_RECONNECT,
+    MENU_CLOSE,
+    MENU_COUNT,
+} menu_item_t;
+
 static EventGroupHandle_t s_wifi_event_group;
 static SemaphoreHandle_t s_color_done;
 static esp_lcd_panel_io_handle_t s_lcd_io;
 static int s_wifi_retry_count;
+static int s_wifi_profile_index;
 static bool s_wifi_ready;
+static bool s_wifi_started;
+static ui_mode_t s_ui_mode = UI_HOME;
+static menu_item_t s_menu_item = MENU_RECONNECT;
 static char s_device_id[48] = "arduino-nesso-n1-unknown";
 static char s_ip_addr[16] = "0.0.0.0";
 static char s_display_text[DISPLAY_TEXT_MAX] = "Display ready.";
@@ -128,6 +152,9 @@ static uint16_t s_line_buffer[LCD_H_RES];
 static uint16_t s_block_buffer[LCD_H_RES * LCD_BLOCK_LINES];
 
 static bool extract_json_string(const char *json, const char *key, char *out, size_t out_size);
+static esp_err_t wifi_reconnect(void);
+static void register_with_server(void);
+static void send_status_update(void);
 
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -488,7 +515,7 @@ static void update_home_text(void)
     if (s_wifi_ready) {
         snprintf(s_display_text, sizeof(s_display_text), "Online\n%s", s_ip_addr);
     } else {
-        strlcpy(s_display_text, "Wi-Fi offline", sizeof(s_display_text));
+        strlcpy(s_display_text, "Wi-Fi offline\nHold KEY1 for menu", sizeof(s_display_text));
     }
 }
 
@@ -519,6 +546,9 @@ static void render_battery_icon(void)
 
 static void render_home(void)
 {
+    if (s_ui_mode != UI_HOME) {
+        return;
+    }
     const uint16_t bg = rgb565(6, 10, 14);
     const uint16_t fg = rgb565(220, 235, 230);
     const uint16_t muted = rgb565(96, 168, 210);
@@ -527,6 +557,28 @@ static void render_home(void)
     render_battery_icon();
     draw_text_centered(74, 120, 6, s_display_text, fg, bg, 1);
     draw_text_centered(204, 120, 2, s_device_id, muted, bg, 1);
+}
+
+static void render_menu(void)
+{
+    const uint16_t bg = rgb565(6, 10, 14);
+    const uint16_t fg = rgb565(220, 235, 230);
+    const uint16_t muted = rgb565(96, 168, 210);
+    fill_rect(0, 0, LCD_H_RES, LCD_V_RES, bg);
+    draw_text_at(8, 20, "MENU", muted, bg, 1);
+    draw_text_at(16, 88, s_menu_item == MENU_RECONNECT ? "> Reconnect" : "  Reconnect", fg, bg, 1);
+    draw_text_at(16, 112, s_menu_item == MENU_CLOSE ? "> Close" : "  Close", fg, bg, 1);
+    draw_text_centered(190, 120, 3, "Press: next\nHold: select", muted, bg, 1);
+}
+
+static void render_reconnecting(void)
+{
+    const uint16_t bg = rgb565(6, 10, 14);
+    const uint16_t fg = rgb565(220, 235, 230);
+    const uint16_t muted = rgb565(96, 168, 210);
+    fill_rect(0, 0, LCD_H_RES, LCD_V_RES, bg);
+    draw_text_at(8, 20, "NESSO N1", muted, bg, 1);
+    draw_text_centered(110, 120, 3, "Reconnecting...", fg, bg, 1);
 }
 
 static void render_alert(const char *text)
@@ -702,12 +754,77 @@ static void send_button_event(const char *button, const char *event, uint32_t co
     }
 }
 
+static void open_menu(void)
+{
+    s_ui_mode = UI_MENU;
+    s_menu_item = MENU_RECONNECT;
+    render_menu();
+}
+
+static void close_menu(void)
+{
+    s_ui_mode = UI_HOME;
+    update_home_text();
+    render_home();
+}
+
+static void menu_next(void)
+{
+    if (s_ui_mode != UI_MENU) {
+        return;
+    }
+    s_menu_item = (menu_item_t)(((int)s_menu_item + 1) % MENU_COUNT);
+    render_menu();
+}
+
+static void menu_select(void)
+{
+    if (s_ui_mode != UI_MENU) {
+        return;
+    }
+    if (s_menu_item == MENU_CLOSE) {
+        close_menu();
+        return;
+    }
+
+    s_ui_mode = UI_RECONNECTING;
+    render_reconnecting();
+    esp_err_t ret = wifi_reconnect();
+    ESP_LOGI(TAG, "Manual Wi-Fi reconnect result: %s", esp_err_to_name(ret));
+    s_ui_mode = UI_HOME;
+    update_home_text();
+    render_home();
+    if (s_wifi_ready) {
+        register_with_server();
+        send_status_update();
+    }
+}
+
+static void handle_key1_short_press(void)
+{
+    if (s_ui_mode == UI_MENU) {
+        menu_next();
+        return;
+    }
+    send_button_event("KEY1", "press", ++s_key1_count);
+}
+
+static void handle_key1_long_press(void)
+{
+    if (s_ui_mode == UI_MENU) {
+        menu_select();
+        return;
+    }
+    open_menu();
+}
+
 static void poll_buttons(void)
 {
     static bool key1_down;
     static bool key2_down;
     static int stable_key1;
     static int stable_key2;
+    static int64_t key1_down_at;
 
     uint8_t input = 0xff;
     if (i2c_read_reg(IOE_KEY_ADDR, IOE_REG_INPUT, &input) != ESP_OK) {
@@ -723,7 +840,14 @@ static void poll_buttons(void)
         key1_down = key1_now;
         stable_key1 = 0;
         if (key1_down) {
-            send_button_event("KEY1", "press", ++s_key1_count);
+            key1_down_at = esp_timer_get_time();
+        } else {
+            int64_t held_us = esp_timer_get_time() - key1_down_at;
+            if (held_us >= MENU_LONG_PRESS_US) {
+                handle_key1_long_press();
+            } else {
+                handle_key1_short_press();
+            }
         }
     }
 
@@ -891,12 +1015,13 @@ static void poll_events(void)
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        ESP_LOGI(TAG, "Wi-Fi started");
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_wifi_ready = false;
         if (s_wifi_retry_count < WIFI_MAX_RETRIES) {
             s_wifi_retry_count++;
             esp_wifi_connect();
+            ESP_LOGI(TAG, "Wi-Fi retry %d/%d", s_wifi_retry_count, WIFI_MAX_RETRIES);
         } else {
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
@@ -908,6 +1033,56 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         ESP_LOGI(TAG, "Wi-Fi connected ip=%s", s_ip_addr);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
+}
+
+static const wifi_profile_t s_wifi_profiles[] = {
+    {"primary", CONFIG_NESSO_N1_WIFI_SSID, CONFIG_NESSO_N1_WIFI_PASSWORD},
+    {"secondary", CONFIG_NESSO_N1_WIFI_SECONDARY_SSID, CONFIG_NESSO_N1_WIFI_SECONDARY_PASSWORD},
+};
+
+static bool wifi_profile_available(int index)
+{
+    return index >= 0 && index < (int)(sizeof(s_wifi_profiles) / sizeof(s_wifi_profiles[0])) &&
+           strlen(s_wifi_profiles[index].ssid) > 0;
+}
+
+static esp_err_t wifi_connect_profile(int index)
+{
+    ESP_RETURN_ON_FALSE(wifi_profile_available(index), ESP_ERR_INVALID_ARG, TAG, "Wi-Fi profile missing");
+    s_wifi_profile_index = index;
+    s_wifi_retry_count = 0;
+    s_wifi_ready = false;
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+
+    wifi_config_t wifi_config = {0};
+    strlcpy((char *)wifi_config.sta.ssid, s_wifi_profiles[index].ssid, sizeof(wifi_config.sta.ssid));
+    strlcpy((char *)wifi_config.sta.password, s_wifi_profiles[index].password, sizeof(wifi_config.sta.password));
+    wifi_config.sta.threshold.authmode = strlen(s_wifi_profiles[index].password) > 0 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+
+    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_config), TAG, "set Wi-Fi config");
+    ESP_LOGI(TAG, "Connecting to %s Wi-Fi profile", s_wifi_profiles[index].name);
+    ESP_RETURN_ON_ERROR(esp_wifi_connect(), TAG, "connect Wi-Fi");
+    EventBits_t bits = xEventGroupWaitBits(
+        s_wifi_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE,
+        pdFALSE,
+        pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
+    return (bits & WIFI_CONNECTED_BIT) != 0 ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t wifi_connect_any_profile(void)
+{
+    for (int i = 0; i < (int)(sizeof(s_wifi_profiles) / sizeof(s_wifi_profiles[0])); ++i) {
+        if (!wifi_profile_available(i)) {
+            continue;
+        }
+        if (wifi_connect_profile(i) == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "%s Wi-Fi profile failed", s_wifi_profiles[i].name);
+    }
+    return ESP_FAIL;
 }
 
 static esp_err_t wifi_init_sta(void)
@@ -925,16 +1100,21 @@ static esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, NULL));
 
-    wifi_config_t wifi_config = {0};
-    strlcpy((char *)wifi_config.sta.ssid, CONFIG_NESSO_N1_WIFI_SSID, sizeof(wifi_config.sta.ssid));
-    strlcpy((char *)wifi_config.sta.password, CONFIG_NESSO_N1_WIFI_PASSWORD, sizeof(wifi_config.sta.password));
-    wifi_config.sta.threshold.authmode = strlen(CONFIG_NESSO_N1_WIFI_PASSWORD) > 0 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(12000));
-    return s_wifi_ready ? ESP_OK : ESP_FAIL;
+    s_wifi_started = true;
+    return wifi_connect_any_profile();
+}
+
+static esp_err_t wifi_reconnect(void)
+{
+    if (!s_wifi_started) {
+        return wifi_init_sta();
+    }
+    s_wifi_retry_count = WIFI_MAX_RETRIES;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_disconnect());
+    vTaskDelay(pdMS_TO_TICKS(200));
+    return wifi_connect_any_profile();
 }
 
 static void storage_init(void)
@@ -991,7 +1171,7 @@ void app_main(void)
             next_status = now + STATUS_INTERVAL_US;
             send_status_update();
         }
-        if (s_wifi_ready && now >= next_poll) {
+        if (s_wifi_ready && s_ui_mode == UI_HOME && now >= next_poll) {
             next_poll = now + EVENT_POLL_INTERVAL_US;
             poll_events();
         }
