@@ -801,7 +801,8 @@ DASHBOARD_HTML = """<!doctype html>
     textarea { min-height: 72px; resize: vertical; }
     button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
     .action-form { display: grid; gap: 8px; }
-    .form-grid { display: grid; grid-template-columns: minmax(180px, 1fr) 150px 160px; gap: 8px; }
+    .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 150px) minmax(0, 160px); gap: 8px; }
+    #missionForm input, #missionForm select, #missionForm textarea { width: 100%; max-width: 100%; }
     .form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .auth-panel { margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
     .auth-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
