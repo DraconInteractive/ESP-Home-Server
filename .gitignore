@@ -59,3 +59,7 @@ __pycache__/
 .DS_Store
 *.swp
 *~
+
+# .NET build outputs (windows-pairing-agent)
+windows-pairing-agent/bin/
+windows-pairing-agent/obj/

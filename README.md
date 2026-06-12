@@ -43,6 +43,7 @@ their role. Cloud use is currently limited to speech-to-text via ElevenLabs.
 | `button-node-firmware/` | Seeed XIAO ESP32-C3 button node firmware. |
 | `nesso-n1-firmware/` | Arduino Nesso N1 display/input firmware with battery-aware boot recovery. |
 | `c6-lcd-147-firmware/` | Waveshare ESP32-C6 1.47 inch LCD display node firmware. |
+| `windows-pairing-agent/` | Windows tray app that sends relay IP pairing updates for this PC. |
 
 Each firmware project is a standalone ESP-IDF project with its own README and
 local `sdkconfig`. Local Wi-Fi credentials, server URLs, and API keys are not
