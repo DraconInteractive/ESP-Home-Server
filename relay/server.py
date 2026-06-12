@@ -914,6 +914,8 @@ DASHBOARD_HTML = """<!doctype html>
     .action-form { display: grid; gap: 8px; }
     .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 150px) minmax(0, 160px); gap: 8px; }
     #missionForm input, #missionForm select, #missionForm textarea { width: 100%; max-width: 100%; }
+    .pairing-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    #pairingForm input, #pairingForm select, #pairingForm textarea { width: 100%; max-width: 100%; }
     .form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .auth-panel { margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
     .auth-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
@@ -940,7 +942,7 @@ DASHBOARD_HTML = """<!doctype html>
       .header-inner { align-items: flex-start; flex-direction: column; }
       .top-status { justify-content: flex-start; text-align: left; }
       main { padding-inline: 14px; }
-      .form-grid { grid-template-columns: 1fr; }
+      .form-grid, .pairing-grid { grid-template-columns: 1fr; }
       .row-head, .section-title { align-items: flex-start; flex-direction: column; }
     }
   </style>
@@ -1006,7 +1008,32 @@ DASHBOARD_HTML = """<!doctype html>
       <section class="rows" id="missionTasks"></section>
     </section>
     <section class="tab-panel" data-tab-panel="pairing">
-      <div class="section-title"><h2>IP Pairing</h2><span class="muted" id="pairedDeviceCount"></span></div>
+      <div class="section-title">
+        <h2>IP Pairing</h2>
+        <div class="form-actions">
+          <span class="muted" id="pairedDeviceCount"></span>
+          <button id="openPairingForm" type="button">Register</button>
+        </div>
+      </div>
+      <div class="row" id="pairingFormPanel" hidden>
+        <form class="action-form" id="pairingForm">
+          <div class="pairing-grid">
+            <input id="pairingDeviceId" type="text" placeholder="Device ID" autocomplete="off">
+            <input id="pairingName" type="text" placeholder="Name" autocomplete="off">
+            <input id="pairingType" type="text" placeholder="Type, e.g. windows-pc" autocomplete="off">
+            <input id="pairingHostname" type="text" placeholder="Hostname" autocomplete="off">
+            <input id="pairingLocalIps" type="text" placeholder="Local IPs, comma separated" autocomplete="off">
+            <input id="pairingExternalIp" type="text" placeholder="External IP" autocomplete="off">
+            <input id="pairingPorts" type="text" placeholder="Ports, e.g. ssh:22,rdp:3389" autocomplete="off">
+          </div>
+          <textarea id="pairingNotes" placeholder="Notes, optional"></textarea>
+          <div class="form-actions">
+            <button type="submit">Save Pairing</button>
+            <button id="closePairingForm" type="button">Cancel</button>
+            <span class="muted" id="pairingFormResult"></span>
+          </div>
+        </form>
+      </div>
       <section class="rows" id="pairedDevices"></section>
     </section>
     <section class="tab-panel" data-tab-panel="devices">
@@ -1117,7 +1144,7 @@ DASHBOARD_HTML = """<!doctype html>
       for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks", "pairedDevices"]) {
         clear(document.getElementById(id));
       }
-      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "missionFormResult", "pairedDeviceCount"]) {
+      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "missionFormResult", "pairedDeviceCount", "pairingFormResult"]) {
         document.getElementById(id).textContent = "";
       }
     }
@@ -1210,6 +1237,66 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       button.textContent = "Queued";
+      load();
+    }
+    function csvList(value) {
+      return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+    }
+    async function openPairingFormPanel() {
+      const panel = document.getElementById("pairingFormPanel");
+      const result = document.getElementById("pairingFormResult");
+      panel.hidden = false;
+      result.textContent = "Reading external IP...";
+      try {
+        const response = await fetch("/dashboard-client-info", {cache: "no-store", headers: authHeaders()});
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.external_ip) {
+          document.getElementById("pairingExternalIp").value = data.external_ip;
+          result.textContent = "External IP filled.";
+        } else {
+          result.textContent = "External IP unavailable.";
+        }
+      } catch (error) {
+        result.textContent = "External IP unavailable.";
+      }
+      document.getElementById("pairingDeviceId").focus();
+    }
+    function closePairingFormPanel() {
+      document.getElementById("pairingFormPanel").hidden = true;
+      document.getElementById("pairingFormResult").textContent = "";
+    }
+    async function registerPairedDevice(event) {
+      event.preventDefault();
+      const result = document.getElementById("pairingFormResult");
+      const payload = {
+        device_id: document.getElementById("pairingDeviceId").value,
+        name: document.getElementById("pairingName").value,
+        type: document.getElementById("pairingType").value,
+        hostname: document.getElementById("pairingHostname").value,
+        local_ips: csvList(document.getElementById("pairingLocalIps").value),
+        external_ip: document.getElementById("pairingExternalIp").value,
+        ports: csvList(document.getElementById("pairingPorts").value),
+        notes: document.getElementById("pairingNotes").value,
+      };
+      if (!payload.device_id.trim()) {
+        result.textContent = "Device ID is required.";
+        return;
+      }
+      result.textContent = "Saving...";
+      const response = await fetch("/dashboard/paired-devices", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json", ...authHeaders()},
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) {
+        result.textContent = data.error || `Failed: HTTP ${response.status}`;
+        return;
+      }
+      result.textContent = "Saved.";
+      document.getElementById("pairingForm").reset();
+      closePairingFormPanel();
       load();
     }
     function renderMissionBoard(homePayload) {
@@ -1462,6 +1549,9 @@ DASHBOARD_HTML = """<!doctype html>
       render(await response.json());
     }
     document.getElementById("missionForm").addEventListener("submit", createMissionTask);
+    document.getElementById("openPairingForm").addEventListener("click", openPairingFormPanel);
+    document.getElementById("closePairingForm").addEventListener("click", closePairingFormPanel);
+    document.getElementById("pairingForm").addEventListener("submit", registerPairedDevice);
     document.getElementById("missionDueDate").value = todayText();
     initTabs();
     load();
@@ -1498,6 +1588,14 @@ class RelayHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 payload = relay_snapshot()
             json_response(self, 200, payload)
+            return
+
+        if parsed.path == "/dashboard-client-info":
+            auth = require_dashboard_access(self)
+            if not auth.ok:
+                auth_error(self, auth)
+                return
+            json_response(self, 200, {"ok": True, "external_ip": client_ip(self)})
             return
 
         if parsed.path == "/sync/events":
@@ -1591,6 +1689,23 @@ class RelayHandler(BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     event = queue_mission_task_complete(payload, self)
                 json_response(self, 202, {"ok": True, "relay_event": event})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/dashboard/paired-devices":
+            auth = require_dashboard_access(self)
+            if not auth.ok:
+                auth_error(self, auth)
+                return
+            try:
+                payload = read_json_body(self)
+                device_id = clean_id(str(payload.get("device_id", "")))
+                if not device_id:
+                    raise ValueError("device_id is required")
+                with STATE_LOCK:
+                    device = upsert_paired_device(device_id, payload, self)
+                json_response(self, 200, {"ok": True, "device": device})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
