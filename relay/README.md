@@ -108,6 +108,34 @@ Mission-board posts require dashboard access. They enqueue events for the home
 server; the home server remains the canonical owner of task state and publishes
 the active board back in the dashboard snapshot.
 
+IP pairing lets trusted full computers or servers publish their current
+connection details to the relay for authenticated dashboard lookup:
+
+```text
+POST /paired-devices/{device_id}
+```
+
+Pairing updates require:
+
+```http
+Authorization: Bearer <RELAY_IP_PAIRING_TOKEN>
+```
+
+Example:
+
+```sh
+curl https://relay.dracon.au/paired-devices/home-server \
+  -H "Authorization: Bearer $RELAY_IP_PAIRING_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"Home Server","type":"antix","hostname":"DraconAXMini","local_ips":["192.168.4.20"],"ports":["ssh:22","dashboard:8080"],"notes":"Primary local command server"}'
+```
+
+The relay infers the public source IP from the HTTPS request when
+`external_ip` is not supplied. Paired device details are included only in the
+authenticated dashboard data; if `RELAY_IP_PAIRING_TOKEN` is configured, the
+dashboard requires either the long dashboard token or a valid phone-code
+session.
+
 Remote devices:
 
 ```text

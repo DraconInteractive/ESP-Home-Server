@@ -41,6 +41,7 @@ DEVICE_ENROLL_TOKEN = os.environ.get("RELAY_DEVICE_ENROLL_TOKEN", "")
 SYNC_TOKEN = os.environ.get("RELAY_SYNC_TOKEN", "")
 DASHBOARD_TOKEN = os.environ.get("RELAY_DASHBOARD_TOKEN", "")
 ADMIN_TOKEN = os.environ.get("RELAY_ADMIN_TOKEN", DASHBOARD_TOKEN)
+IP_PAIRING_TOKEN = os.environ.get("RELAY_IP_PAIRING_TOKEN", "")
 NTFY_URL = os.environ.get("RELAY_NTFY_URL", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.environ.get("RELAY_NTFY_TOPIC", "")
 NTFY_TOKEN = os.environ.get("RELAY_NTFY_TOKEN", "")
@@ -125,6 +126,16 @@ def init_database() -> None:
                 payload_json TEXT NOT NULL DEFAULT '{}'
             )
         """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS paired_devices (
+                device_id TEXT PRIMARY KEY,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                remote_addr TEXT,
+                user_agent TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
 
 
 def clean_id(value: str, fallback: str = "") -> str:
@@ -173,7 +184,7 @@ def require_dashboard_access(handler: BaseHTTPRequestHandler) -> AuthResult:
     with STATE_LOCK:
         if dashboard_session_valid(provided):
             return AuthResult(True, HTTPStatus.OK, "")
-    if DASHBOARD_TOKEN or NTFY_TOPIC:
+    if DASHBOARD_TOKEN or NTFY_TOPIC or IP_PAIRING_TOKEN:
         return AuthResult(False, HTTPStatus.UNAUTHORIZED, "unauthorized")
     return AuthResult(True, HTTPStatus.OK, "")
 
@@ -402,6 +413,102 @@ def public_device(row: sqlite3.Row) -> dict[str, Any]:
         if key in payload:
             device[key] = payload[key]
     return device
+
+
+def paired_device_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "id": row["device_id"],
+        "first_seen": row["first_seen"],
+        "last_seen": row["last_seen"],
+        "remote_addr": row["remote_addr"],
+        "user_agent": row["user_agent"],
+        "name": payload.get("name") or row["device_id"],
+        "type": payload.get("type", "computer"),
+        "hostname": payload.get("hostname", ""),
+        "local_ips": payload.get("local_ips") if isinstance(payload.get("local_ips"), list) else [],
+        "external_ip": payload.get("external_ip") or row["remote_addr"],
+        "ports": payload.get("ports") if isinstance(payload.get("ports"), list) else [],
+        "notes": payload.get("notes", ""),
+        "payload": payload,
+    }
+
+
+def paired_devices() -> list[dict[str, Any]]:
+    with db_connect() as connection:
+        rows = connection.execute("SELECT * FROM paired_devices ORDER BY device_id ASC").fetchall()
+    return [paired_device_from_row(row) for row in rows]
+
+
+def clean_ip_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        items = re.split(r"[\s,]+", value)
+    elif isinstance(value, list):
+        items = [str(item) for item in value]
+    else:
+        items = []
+    result: list[str] = []
+    for item in items:
+        cleaned = item.strip()[:80]
+        if cleaned:
+            result.append(cleaned)
+    return result[:12]
+
+
+def clean_port_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        items = re.split(r"[\s,]+", value)
+    elif isinstance(value, list):
+        items = [str(item) for item in value]
+    else:
+        items = []
+    result: list[str] = []
+    for item in items:
+        cleaned = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", item.strip())[:40]
+        if cleaned:
+            result.append(cleaned)
+    return result[:20]
+
+
+def upsert_paired_device(device_id: str, payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    now = int(time.time())
+    public_ip = client_ip(handler)
+    record = {
+        "name": str(payload.get("name", device_id)).strip()[:120] or device_id,
+        "type": str(payload.get("type", "computer")).strip()[:60] or "computer",
+        "hostname": str(payload.get("hostname", "")).strip()[:120],
+        "local_ips": clean_ip_list(payload.get("local_ips", payload.get("local_ip", []))),
+        "external_ip": str(payload.get("external_ip", "")).strip()[:80] or public_ip,
+        "ports": clean_port_list(payload.get("ports", [])),
+        "notes": str(payload.get("notes", "")).strip()[:500],
+    }
+    with db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO paired_devices (device_id, first_seen, last_seen, remote_addr, user_agent, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                last_seen = excluded.last_seen,
+                remote_addr = excluded.remote_addr,
+                user_agent = excluded.user_agent,
+                payload_json = excluded.payload_json
+            """,
+            (
+                device_id,
+                now,
+                now,
+                public_ip,
+                handler.headers.get("User-Agent", ""),
+                json.dumps(record, separators=(",", ":")),
+            ),
+        )
+        row = connection.execute("SELECT * FROM paired_devices WHERE device_id = ?", (device_id,)).fetchone()
+    return paired_device_from_row(row)
 
 
 def row_event(row: sqlite3.Row) -> dict[str, Any]:
@@ -692,6 +799,7 @@ def latest_dashboard_snapshot() -> dict[str, Any] | None:
 def relay_snapshot() -> dict[str, Any]:
     with db_connect() as connection:
         device_rows = connection.execute("SELECT * FROM devices ORDER BY device_id ASC").fetchall()
+        paired_rows = connection.execute("SELECT * FROM paired_devices ORDER BY device_id ASC").fetchall()
         recent_rows = connection.execute(
             "SELECT * FROM events ORDER BY received_at DESC LIMIT ?",
             (RECENT_LIMIT,),
@@ -703,6 +811,7 @@ def relay_snapshot() -> dict[str, Any]:
             "SELECT count(*) AS count FROM events WHERE acked_at IS NOT NULL",
         ).fetchone()["count"]
     devices = [public_device(row) for row in device_rows]
+    paired = [paired_device_from_row(row) for row in paired_rows]
     recent_events = [row_event(row) for row in reversed(recent_rows)]
     home = latest_dashboard_snapshot()
     return {
@@ -717,8 +826,10 @@ def relay_snapshot() -> dict[str, Any]:
             "has_sync_token": bool(SYNC_TOKEN),
             "has_dashboard_token": bool(DASHBOARD_TOKEN),
             "has_dashboard_code_auth": bool(NTFY_TOPIC),
+            "has_ip_pairing_token": bool(IP_PAIRING_TOKEN),
         },
         "devices": devices,
+        "paired_devices": paired,
         "recent_events": recent_events,
         "home": home,
     }
@@ -865,6 +976,7 @@ DASHBOARD_HTML = """<!doctype html>
     <nav class="tabs" aria-label="Relay dashboard sections">
       <button class="tab-button active" type="button" data-tab="events">Events</button>
       <button class="tab-button" type="button" data-tab="mission">Mission</button>
+      <button class="tab-button" type="button" data-tab="pairing">Pairing</button>
       <button class="tab-button" type="button" data-tab="devices">Devices</button>
       <button class="tab-button" type="button" data-tab="uptime">Uptime</button>
     </nav>
@@ -892,6 +1004,10 @@ DASHBOARD_HTML = """<!doctype html>
         </form>
       </div>
       <section class="rows" id="missionTasks"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="pairing">
+      <div class="section-title"><h2>IP Pairing</h2><span class="muted" id="pairedDeviceCount"></span></div>
+      <section class="rows" id="pairedDevices"></section>
     </section>
     <section class="tab-panel" data-tab-panel="devices">
       <div class="section-title"><h2>Remote Devices</h2><span class="muted" id="remoteDeviceCount"></span></div>
@@ -998,10 +1114,10 @@ DASHBOARD_HTML = """<!doctype html>
       logoutButton.hidden = !authenticated;
     }
     function clearDashboard() {
-      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks"]) {
+      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks", "pairedDevices"]) {
         clear(document.getElementById(id));
       }
-      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "missionFormResult"]) {
+      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "missionFormResult", "pairedDeviceCount"]) {
         document.getElementById(id).textContent = "";
       }
     }
@@ -1129,6 +1245,37 @@ DASHBOARD_HTML = """<!doctype html>
         root.append(row);
       }
     }
+    function renderPairedDevices(devices) {
+      const root = document.getElementById("pairedDevices");
+      clear(root);
+      const paired = Array.isArray(devices) ? devices : [];
+      document.getElementById("pairedDeviceCount").textContent = `${paired.length} paired`;
+      if (!paired.length) {
+        root.append(el("div", "row muted", "No paired IP devices."));
+        return;
+      }
+      for (const device of paired) {
+        const row = el("div", "row");
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", device.name || device.id));
+        title.append(el("div", "muted meta-line", `${device.type || "computer"}${device.hostname ? ` · ${device.hostname}` : ""}`));
+        head.append(title);
+        head.append(pill("paired", "neutral"));
+        row.append(head);
+        const meta = el("div", "device-meta");
+        meta.append(kv("External IP", device.external_ip || device.remote_addr));
+        meta.append(kv("Local IPs", Array.isArray(device.local_ips) ? device.local_ips.join(", ") : ""));
+        meta.append(kv("Ports", Array.isArray(device.ports) ? device.ports.join(", ") : ""));
+        meta.append(kv("Last update", timeText(device.last_seen)));
+        meta.append(kv("First seen", timeText(device.first_seen)));
+        meta.append(kv("Remote address", device.remote_addr));
+        row.append(meta);
+        if (device.notes) row.append(el("div", "muted meta-line", device.notes));
+        row.append(jsonBlock(device.payload || {}));
+        root.append(row);
+      }
+    }
     function render(data) {
       setAuthenticated(true);
       statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -1136,6 +1283,7 @@ DASHBOARD_HTML = """<!doctype html>
       clear(summary);
       for (const [label, value] of [
         ["Remote devices", data.relay.device_count],
+        ["Paired IP devices", (data.paired_devices || []).length],
         ["Pending events", data.relay.pending_event_count],
         ["Acked events", data.relay.acked_event_count],
         ["Relay uptime", formatUptime(data.relay.uptime_seconds)],
@@ -1145,6 +1293,8 @@ DASHBOARD_HTML = """<!doctype html>
         stat.append(el("strong", "", String(value)));
         summary.append(stat);
       }
+
+      renderPairedDevices(data.paired_devices);
 
       const devices = document.getElementById("devices");
       clear(devices);
@@ -1441,6 +1591,21 @@ class RelayHandler(BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     event = queue_mission_task_complete(payload, self)
                 json_response(self, 202, {"ok": True, "relay_event": event})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path.startswith("/paired-devices/"):
+            auth = require_static_token(self, IP_PAIRING_TOKEN, "ip pairing")
+            if not auth.ok:
+                auth_error(self, auth)
+                return
+            device_id = clean_id(parsed.path.removeprefix("/paired-devices/"))
+            try:
+                payload = read_json_body(self)
+                with STATE_LOCK:
+                    device = upsert_paired_device(device_id, payload, self)
+                json_response(self, 200, {"ok": True, "device": device})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
