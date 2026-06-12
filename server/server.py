@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -47,6 +48,16 @@ RELAY_SYNC_TOKEN = os.environ.get("COMMAND_SERVER_RELAY_SYNC_TOKEN", "")
 RELAY_POLL_SECONDS = max(2.0, float(os.environ.get("COMMAND_SERVER_RELAY_POLL_SECONDS", "5.0")))
 RELAY_SNAPSHOT_SECONDS = max(10.0, float(os.environ.get("COMMAND_SERVER_RELAY_SNAPSHOT_SECONDS", "30.0")))
 RELAY_TIMEOUT_SECONDS = max(2.0, float(os.environ.get("COMMAND_SERVER_RELAY_TIMEOUT_SECONDS", "10.0")))
+RELAY_PAIRING_ENABLED = os.environ.get("COMMAND_SERVER_RELAY_PAIRING_ENABLED", "1") == "1"
+RELAY_PAIRING_URL = os.environ.get("COMMAND_SERVER_RELAY_PAIRING_URL", RELAY_URL).rstrip("/")
+RELAY_IP_PAIRING_TOKEN = os.environ.get("COMMAND_SERVER_RELAY_IP_PAIRING_TOKEN", "")
+RELAY_PAIRING_DEVICE_ID = os.environ.get("COMMAND_SERVER_RELAY_PAIRING_DEVICE_ID", "home-server")
+RELAY_PAIRING_NAME = os.environ.get("COMMAND_SERVER_RELAY_PAIRING_NAME", "Home Server")
+RELAY_PAIRING_TYPE = os.environ.get("COMMAND_SERVER_RELAY_PAIRING_TYPE", "antix-server")
+RELAY_PAIRING_PORTS = os.environ.get("COMMAND_SERVER_RELAY_PAIRING_PORTS", "ssh:22,dashboard:8080")
+RELAY_PAIRING_NOTES = os.environ.get("COMMAND_SERVER_RELAY_PAIRING_NOTES", "Primary local command server")
+RELAY_PAIRING_LOCAL_IPS = os.environ.get("COMMAND_SERVER_RELAY_PAIRING_LOCAL_IPS", "")
+RELAY_PAIRING_SECONDS = max(60.0, float(os.environ.get("COMMAND_SERVER_RELAY_PAIRING_SECONDS", "300.0")))
 DEVICE_NAMES_PATH = os.environ.get(
     "COMMAND_SERVER_DEVICE_NAMES_PATH",
     os.path.join(os.path.dirname(__file__), "device-names.json"),
@@ -2000,6 +2011,100 @@ def relay_request_json(path: str, method: str = "GET", payload: dict[str, Any] |
     if not isinstance(parsed, dict):
         raise ValueError("relay response must be a JSON object")
     return parsed
+
+
+def relay_pairing_request_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not RELAY_PAIRING_URL:
+        raise RuntimeError("COMMAND_SERVER_RELAY_PAIRING_URL or COMMAND_SERVER_RELAY_URL is not configured")
+    if not RELAY_IP_PAIRING_TOKEN:
+        raise RuntimeError("COMMAND_SERVER_RELAY_IP_PAIRING_TOKEN is not configured")
+
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {RELAY_IP_PAIRING_TOKEN}",
+        "Content-Type": "application/json",
+        "User-Agent": "SpokenCommandServerPairing/0.1",
+    }
+    request = Request(f"{RELAY_PAIRING_URL}{path}", data=body, headers=headers, method="POST")
+    with urlopen(request, timeout=RELAY_TIMEOUT_SECONDS) as response:
+        data = response.read()
+    if not data:
+        return {}
+    parsed = json.loads(data.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError("relay pairing response must be a JSON object")
+    return parsed
+
+
+def split_csv_values(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def discover_local_ips() -> list[str]:
+    configured = split_csv_values(RELAY_PAIRING_LOCAL_IPS)
+    if configured:
+        return configured
+
+    addresses: set[str] = set()
+    hostname = socket.gethostname()
+    try:
+        for family, _, _, _, sockaddr in socket.getaddrinfo(hostname, None):
+            if family not in (socket.AF_INET, socket.AF_INET6):
+                continue
+            address = str(sockaddr[0])
+            if address.startswith("127.") or address == "::1" or address.startswith("fe80:"):
+                continue
+            addresses.add(address)
+    except OSError:
+        pass
+
+    probes = (
+        (socket.AF_INET, ("8.8.8.8", 80)),
+        (socket.AF_INET6, ("2001:4860:4860::8888", 80)),
+    )
+    for family, target in probes:
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as probe:
+                probe.connect(target)
+                address = str(probe.getsockname()[0])
+                if not address.startswith("127.") and address != "::1" and not address.startswith("fe80:"):
+                    addresses.add(address)
+        except OSError:
+            pass
+
+    return sorted(addresses)
+
+
+def relay_pairing_payload() -> dict[str, Any]:
+    return {
+        "name": RELAY_PAIRING_NAME,
+        "type": RELAY_PAIRING_TYPE,
+        "hostname": socket.gethostname(),
+        "local_ips": discover_local_ips(),
+        "ports": split_csv_values(RELAY_PAIRING_PORTS),
+        "notes": RELAY_PAIRING_NOTES,
+    }
+
+
+def relay_pairing_worker() -> None:
+    if not RELAY_PAIRING_ENABLED:
+        return
+    if not RELAY_PAIRING_URL or not RELAY_IP_PAIRING_TOKEN:
+        print(
+            "Relay pairing disabled: "
+            "COMMAND_SERVER_RELAY_PAIRING_URL/COMMAND_SERVER_RELAY_URL "
+            "or COMMAND_SERVER_RELAY_IP_PAIRING_TOKEN is missing."
+        )
+        return
+
+    device_id = clean_device_id(RELAY_PAIRING_DEVICE_ID)
+    while True:
+        try:
+            relay_pairing_request_json(f"/paired-devices/{device_id}", relay_pairing_payload())
+        except Exception as exc:
+            print(f"Relay pairing update failed: {exc}")
+        time.sleep(RELAY_PAIRING_SECONDS)
 
 
 def relay_ack_event(event_id: str, ok: bool, error: str = "") -> None:
@@ -6105,6 +6210,8 @@ def main() -> None:
     threading.Thread(target=uptime_worker, name="uptime-worker", daemon=True).start()
     if RELAY_ENABLED:
         threading.Thread(target=relay_sync_worker, name="relay-sync-worker", daemon=True).start()
+    if RELAY_PAIRING_ENABLED:
+        threading.Thread(target=relay_pairing_worker, name="relay-pairing-worker", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), CommandHandler)
     print(f"Listening on http://{HOST}:{PORT}")
     print("POST audio to /audio/command with ELEVENLABS_API_KEY set in the environment.")
