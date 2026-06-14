@@ -1482,6 +1482,7 @@ DASHBOARD_HTML = """<!doctype html>
     const code = document.getElementById("code");
     const logoutButton = document.getElementById("logoutButton");
     const openHomeDevices = new Set();
+    let renderingHomeDevices = false;
     let missionCalendarDate = new Date();
     missionCalendarDate.setDate(1);
     let latestMissionToday = todayText();
@@ -1965,6 +1966,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
 
       const homeDevices = document.getElementById("homeDevices");
+      renderingHomeDevices = true;
       clear(homeDevices);
       const homePayload = data.home?.payload || {};
       renderMissionBoard(homePayload);
@@ -1978,7 +1980,7 @@ DASHBOARD_HTML = """<!doctype html>
         const deviceKey = String(device.id || device.display_name || "");
         row.open = openHomeDevices.has(deviceKey);
         row.addEventListener("toggle", () => {
-          if (!deviceKey) return;
+          if (!deviceKey || renderingHomeDevices) return;
           if (row.open) openHomeDevices.add(deviceKey);
           else openHomeDevices.delete(deviceKey);
         });
@@ -2013,6 +2015,7 @@ DASHBOARD_HTML = """<!doctype html>
         row.append(jsonBlock(device));
         homeDevices.append(row);
       }
+      setTimeout(() => { renderingHomeDevices = false; }, 0);
 
       const uptimeMonitors = document.getElementById("uptimeMonitors");
       clear(uptimeMonitors);
