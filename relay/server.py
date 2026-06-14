@@ -1484,6 +1484,7 @@ DASHBOARD_HTML = """<!doctype html>
     const openHomeDevices = new Set();
     let missionCalendarDate = new Date();
     missionCalendarDate.setDate(1);
+    let latestMissionToday = todayText();
 
     function el(tag, className, text) {
       const node = document.createElement(tag);
@@ -1634,6 +1635,9 @@ DASHBOARD_HTML = """<!doctype html>
     });
     function openMissionFormModal() {
       document.getElementById("missionFormResult").textContent = "";
+      if (!document.getElementById("missionDueDate").value) {
+        document.getElementById("missionDueDate").value = latestMissionToday || todayText();
+      }
       document.getElementById("missionModal").classList.add("open");
       document.getElementById("missionTitle").focus();
     }
@@ -1665,6 +1669,8 @@ DASHBOARD_HTML = """<!doctype html>
       }
       document.getElementById("missionTitle").value = "";
       document.getElementById("missionNotes").value = "";
+      document.getElementById("missionDueDate").value = latestMissionToday || todayText();
+      document.getElementById("missionType").value = "persistent";
       result.textContent = "Queued for home sync.";
       closeMissionFormModal();
       load();
@@ -1813,9 +1819,9 @@ DASHBOARD_HTML = """<!doctype html>
       const board = homePayload.mission_board || {};
       const tasks = Array.isArray(board.tasks) ? board.tasks : [];
       const today = board.today || todayText();
+      latestMissionToday = today;
       document.getElementById("missionCount").textContent = `${tasks.length} open`;
       document.getElementById("activeMissionCount").textContent = `${tasks.length} shown`;
-      document.getElementById("missionDueDate").value = today;
       const todayDate = parseDateKey(today);
       if (todayDate && !missionCalendarDate) {
         missionCalendarDate = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
