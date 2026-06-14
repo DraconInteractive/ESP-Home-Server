@@ -1284,6 +1284,44 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .auth-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     .auth-row input { min-width: 180px; }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(8, 5, 2, 0.72);
+      backdrop-filter: blur(4px);
+      z-index: 20;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      width: min(620px, 100%);
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+      padding: 16px;
+      border: 1px solid var(--border-bright);
+      border-top: 2px solid var(--accent);
+      border-radius: 4px;
+      background: linear-gradient(180deg, var(--raised) 0%, var(--panel) 70%);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.56);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .icon-button {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      font-family: var(--mono);
+      font-size: 1rem;
+      line-height: 1;
+    }
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 5px; }
@@ -1338,23 +1376,12 @@ DASHBOARD_HTML = """<!doctype html>
       <section class="rows" id="events"></section>
     </section>
     <section class="tab-panel" data-tab-panel="mission">
-      <div class="section-title"><h2>Mission Board</h2><span class="muted" id="missionCount"></span></div>
-      <div class="row">
-        <form class="action-form" id="missionForm">
-          <div class="form-grid">
-            <input id="missionTitle" type="text" placeholder="Task title" autocomplete="off">
-            <select id="missionType">
-              <option value="persistent">Persistent</option>
-              <option value="daily">Today only</option>
-            </select>
-            <input id="missionDueDate" type="date">
-          </div>
-          <textarea id="missionNotes" placeholder="Notes, optional"></textarea>
-          <div class="form-actions">
-            <button type="submit">Add Task</button>
-            <span class="muted" id="missionFormResult"></span>
-          </div>
-        </form>
+      <div class="section-title">
+        <h2>Mission Board</h2>
+        <div class="form-actions">
+          <span class="muted" id="missionCount"></span>
+          <button id="openMissionForm" type="button">Add Task</button>
+        </div>
       </div>
       <div class="mission-layout">
         <section class="calendar-card" aria-label="Mission calendar">
@@ -1421,6 +1448,30 @@ DASHBOARD_HTML = """<!doctype html>
       <section class="rows" id="uptimeMonitors"></section>
     </section>
   </main>
+  <div class="modal-backdrop" id="missionModal" role="dialog" aria-modal="true" aria-labelledby="missionModalTitle">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="missionModalTitle">Add Task</h2>
+        <button id="closeMissionForm" class="icon-button" type="button" aria-label="Close add task modal">x</button>
+      </div>
+      <form class="action-form" id="missionForm">
+        <div class="form-grid">
+          <input id="missionTitle" type="text" placeholder="Task title" autocomplete="off">
+          <select id="missionType">
+            <option value="persistent">Persistent</option>
+            <option value="daily">Dated</option>
+          </select>
+          <input id="missionDueDate" type="date">
+        </div>
+        <textarea id="missionNotes" placeholder="Notes, optional"></textarea>
+        <div class="form-actions">
+          <button type="submit">Create Task</button>
+          <button id="cancelMissionForm" type="button">Cancel</button>
+          <span class="muted" id="missionFormResult"></span>
+        </div>
+      </form>
+    </div>
+  </div>
   <script>
     const tokenKey = "draconRelayDashboardToken";
     const tabKey = "draconRelayDashboardTab";
@@ -1581,6 +1632,15 @@ DASHBOARD_HTML = """<!doctype html>
       authMessage.textContent = "Request a temporary code on your phone.";
       setAuthenticated(false);
     });
+    function openMissionFormModal() {
+      document.getElementById("missionFormResult").textContent = "";
+      document.getElementById("missionModal").classList.add("open");
+      document.getElementById("missionTitle").focus();
+    }
+    function closeMissionFormModal() {
+      document.getElementById("missionModal").classList.remove("open");
+      document.getElementById("missionFormResult").textContent = "";
+    }
     async function createMissionTask(event) {
       event.preventDefault();
       const result = document.getElementById("missionFormResult");
@@ -1606,6 +1666,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("missionTitle").value = "";
       document.getElementById("missionNotes").value = "";
       result.textContent = "Queued for home sync.";
+      closeMissionFormModal();
       load();
     }
     async function completeMissionTask(taskId, button) {
@@ -1992,6 +2053,17 @@ DASHBOARD_HTML = """<!doctype html>
       render(await response.json());
     }
     document.getElementById("missionForm").addEventListener("submit", createMissionTask);
+    document.getElementById("openMissionForm").addEventListener("click", openMissionFormModal);
+    document.getElementById("closeMissionForm").addEventListener("click", closeMissionFormModal);
+    document.getElementById("cancelMissionForm").addEventListener("click", closeMissionFormModal);
+    document.getElementById("missionModal").addEventListener("click", (event) => {
+      if (event.target.id === "missionModal") closeMissionFormModal();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && document.getElementById("missionModal").classList.contains("open")) {
+        closeMissionFormModal();
+      }
+    });
     document.getElementById("missionCalendarPrev").addEventListener("click", () => {
       missionCalendarDate = new Date(missionCalendarDate.getFullYear(), missionCalendarDate.getMonth() - 1, 1);
       load();
