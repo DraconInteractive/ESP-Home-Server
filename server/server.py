@@ -1090,27 +1090,54 @@ def public_mission_task(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def active_mission_tasks() -> list[dict[str, Any]]:
+def open_mission_tasks() -> list[dict[str, Any]]:
     today = local_date_text()
-    active: list[dict[str, Any]] = []
+    tasks: list[dict[str, Any]] = []
     for task in MISSION_TASKS.values():
         if task.get("status") == "completed":
             continue
+        if str(task.get("task_type", "persistent")) == "daily" and str(task.get("due_date", "")) < today:
+            continue
+        tasks.append(public_mission_task(task))
+    return sorted(
+        tasks,
+        key=lambda item: (
+            str(item.get("due_date") or "9999-99-99"),
+            str(item.get("task_type") or ""),
+            int(item.get("created_at") or 0),
+            str(item.get("title") or ""),
+        ),
+    )
+
+
+def active_mission_tasks(tasks: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    today = local_date_text()
+    active: list[dict[str, Any]] = []
+    for task in tasks if tasks is not None else open_mission_tasks():
         task_type = str(task.get("task_type", "persistent"))
         if task_type == "daily" and str(task.get("due_date", "")) != today:
             continue
-        active.append(public_mission_task(task))
+        active.append(task)
     return sorted(active, key=lambda item: (str(item.get("task_type") or ""), int(item.get("created_at") or 0), str(item.get("title") or "")))
 
 
 def mission_board_summary() -> dict[str, Any]:
-    tasks = active_mission_tasks()
+    tasks = open_mission_tasks()
+    active_tasks = active_mission_tasks(tasks)
+    future_tasks = [
+        task for task in tasks
+        if task.get("task_type") == "daily" and str(task.get("due_date", "")) > local_date_text()
+    ]
     return {
         "today": local_date_text(),
         "tasks": tasks,
-        "total_active": len(tasks),
+        "active_tasks": active_tasks,
+        "future_tasks": future_tasks,
+        "total_open": len(tasks),
+        "total_active": len(active_tasks),
         "persistent_count": sum(1 for task in tasks if task.get("task_type") == "persistent"),
         "daily_count": sum(1 for task in tasks if task.get("task_type") == "daily"),
+        "future_count": len(future_tasks),
     }
 
 
@@ -4865,7 +4892,7 @@ DASHBOARD_HTML = """<!doctype html>
       const tasks = Array.isArray(board?.tasks) ? board.tasks : [];
       document.getElementById("missionDueDate").value = board?.today || todayText();
       if (!tasks.length) {
-        root.append(el("div", "empty", "No active mission tasks."));
+        root.append(el("div", "empty", "No open mission tasks."));
         return;
       }
       for (const task of tasks) {

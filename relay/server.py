@@ -1182,6 +1182,95 @@ DASHBOARD_HTML = """<!doctype html>
       gap: 8px;
     }
     #missionForm input, #missionForm select, #missionForm textarea { width: 100%; max-width: 100%; }
+    .mission-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.75fr);
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .calendar-card {
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: linear-gradient(180deg, var(--raised) 0%, var(--panel) 70%);
+    }
+    .calendar-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .calendar-title {
+      font-family: var(--display);
+      font-size: 0.86rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--bright);
+    }
+    .calendar-controls { display: flex; gap: 6px; flex-wrap: wrap; }
+    .calendar-controls button { height: 30px; padding: 0 10px; }
+    .calendar-weekdays,
+    .calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 4px;
+    }
+    .calendar-weekdays {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      text-align: center;
+    }
+    .calendar-day {
+      min-height: 88px;
+      min-width: 0;
+      padding: 7px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--panel-soft);
+    }
+    .calendar-day.outside { opacity: 0.45; }
+    .calendar-day.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px rgba(240, 168, 57, 0.18); }
+    .calendar-date {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      margin-bottom: 5px;
+    }
+    .calendar-day.today .calendar-date { color: var(--accent); }
+    .calendar-task {
+      display: block;
+      width: 100%;
+      margin-top: 4px;
+      padding: 4px 5px;
+      border: 1px solid rgba(240, 168, 57, 0.3);
+      border-radius: 2px;
+      background: var(--accent-soft);
+      color: var(--bright);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      line-height: 1.25;
+      overflow: hidden;
+      text-align: left;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .calendar-more {
+      margin-top: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+    }
+    .persistent-lane {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
     .pairing-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
     #pairingForm input, #pairingForm select, #pairingForm textarea { width: 100%; max-width: 100%; }
     .form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -1203,7 +1292,8 @@ DASHBOARD_HTML = """<!doctype html>
       .header-inner { align-items: flex-start; flex-direction: column; }
       .top-status { justify-content: flex-start; text-align: left; }
       main { padding-inline: 14px; }
-      .form-grid, .pairing-grid { grid-template-columns: 1fr; }
+      .form-grid, .pairing-grid, .mission-layout { grid-template-columns: 1fr; }
+      .calendar-day { min-height: 68px; padding: 5px; }
       .row-head, .section-title { align-items: flex-start; flex-direction: column; }
     }
   </style>
@@ -1266,6 +1356,27 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
         </form>
       </div>
+      <div class="mission-layout">
+        <section class="calendar-card" aria-label="Mission calendar">
+          <div class="calendar-head">
+            <div class="calendar-title" id="missionCalendarTitle">Calendar</div>
+            <div class="calendar-controls">
+              <button id="missionCalendarPrev" type="button">Prev</button>
+              <button id="missionCalendarToday" type="button">Today</button>
+              <button id="missionCalendarNext" type="button">Next</button>
+            </div>
+          </div>
+          <div class="calendar-weekdays" aria-hidden="true">
+            <div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div><div>Sun</div>
+          </div>
+          <div class="calendar-grid" id="missionCalendar"></div>
+        </section>
+        <section class="persistent-lane">
+          <div class="section-title"><h2>Persistent</h2><span class="muted" id="persistentMissionCount"></span></div>
+          <section class="rows" id="persistentMissionTasks"></section>
+        </section>
+      </div>
+      <div class="section-title"><h2>Open Tasks</h2><span class="muted" id="activeMissionCount"></span></div>
       <section class="rows" id="missionTasks"></section>
     </section>
     <section class="tab-panel" data-tab-panel="pairing">
@@ -1320,6 +1431,8 @@ DASHBOARD_HTML = """<!doctype html>
     const code = document.getElementById("code");
     const logoutButton = document.getElementById("logoutButton");
     const openHomeDevices = new Set();
+    let missionCalendarDate = new Date();
+    missionCalendarDate.setDate(1);
 
     function el(tag, className, text) {
       const node = document.createElement(tag);
@@ -1397,15 +1510,28 @@ DASHBOARD_HTML = """<!doctype html>
       const day = String(now.getDate()).padStart(2, "0");
       return `${now.getFullYear()}-${month}-${day}`;
     }
+    function dateKey(date) {
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${date.getFullYear()}-${month}-${day}`;
+    }
+    function parseDateKey(value) {
+      const match = String(value || "").match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
+      if (!match) return null;
+      return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    }
+    function monthTitle(date) {
+      return date.toLocaleDateString(undefined, {month: "long", year: "numeric"});
+    }
     function setAuthenticated(authenticated) {
       auth.hidden = authenticated;
       logoutButton.hidden = !authenticated;
     }
     function clearDashboard() {
-      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks", "pairedDevices"]) {
+      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks", "persistentMissionTasks", "missionCalendar", "pairedDevices"]) {
         clear(document.getElementById(id));
       }
-      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "missionFormResult", "pairedDeviceCount", "pairingFormResult"]) {
+      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "activeMissionCount", "persistentMissionCount", "missionFormResult", "pairedDeviceCount", "pairingFormResult"]) {
         document.getElementById(id).textContent = "";
       }
     }
@@ -1560,23 +1686,12 @@ DASHBOARD_HTML = """<!doctype html>
       closePairingFormPanel();
       load();
     }
-    function renderMissionBoard(homePayload) {
-      const root = document.getElementById("missionTasks");
-      clear(root);
-      const board = homePayload.mission_board || {};
-      const tasks = Array.isArray(board.tasks) ? board.tasks : [];
-      document.getElementById("missionCount").textContent = `${tasks.length} active`;
-      document.getElementById("missionDueDate").value = board.today || todayText();
-      if (!tasks.length) {
-        root.append(el("div", "row muted", "No active mission tasks."));
-        return;
-      }
-      for (const task of tasks) {
+    function missionTaskRow(task, today, compact = false) {
         const row = el("div", "row");
         const head = el("div", "row-head");
         const title = el("div", "row-title");
         title.append(el("strong", "", task.title || "Untitled task"));
-        const detail = task.task_type === "daily" ? `today only · ${task.due_date || board.today || ""}` : "persistent";
+        const detail = task.task_type === "daily" ? `today only · ${task.due_date || today || ""}` : "persistent";
         title.append(el("div", "muted meta-line", detail));
         head.append(title);
         const done = el("button", "", "Complete");
@@ -1585,13 +1700,80 @@ DASHBOARD_HTML = """<!doctype html>
         head.append(done);
         row.append(head);
         if (task.notes) row.append(el("div", "muted meta-line", task.notes));
-        const meta = el("div", "device-meta");
-        meta.append(kv("ID", task.id));
-        meta.append(kv("Created", timeText(task.created_at)));
-        meta.append(kv("Source", task.source));
-        row.append(meta);
-        root.append(row);
+        if (!compact) {
+          const meta = el("div", "device-meta");
+          meta.append(kv("ID", task.id));
+          meta.append(kv("Created", timeText(task.created_at)));
+          meta.append(kv("Source", task.source));
+          row.append(meta);
+        }
+        return row;
+    }
+    function renderMissionCalendar(tasks, today) {
+      const root = document.getElementById("missionCalendar");
+      clear(root);
+      const calendarTitle = document.getElementById("missionCalendarTitle");
+      calendarTitle.textContent = monthTitle(missionCalendarDate);
+      const year = missionCalendarDate.getFullYear();
+      const month = missionCalendarDate.getMonth();
+      const first = new Date(year, month, 1);
+      const start = new Date(first);
+      start.setDate(first.getDate() - ((first.getDay() + 6) % 7));
+      const byDate = new Map();
+      for (const task of tasks) {
+        if (task.task_type !== "daily") continue;
+        const key = task.due_date || today;
+        if (!byDate.has(key)) byDate.set(key, []);
+        byDate.get(key).push(task);
       }
+      for (let index = 0; index < 42; index += 1) {
+        const date = new Date(start);
+        date.setDate(start.getDate() + index);
+        const key = dateKey(date);
+        const day = el("div", `calendar-day${date.getMonth() === month ? "" : " outside"}${key === today ? " today" : ""}`);
+        day.append(el("div", "calendar-date", String(date.getDate())));
+        const dayTasks = byDate.get(key) || [];
+        for (const task of dayTasks.slice(0, 3)) {
+          const item = el("button", "calendar-task", task.title || "Untitled task");
+          item.type = "button";
+          item.title = task.notes ? `${task.title || "Untitled task"} - ${task.notes}` : (task.title || "Untitled task");
+          item.addEventListener("click", () => setActiveTab("mission"));
+          day.append(item);
+        }
+        if (dayTasks.length > 3) day.append(el("div", "calendar-more", `+${dayTasks.length - 3} more`));
+        root.append(day);
+      }
+    }
+    function renderMissionBoard(homePayload) {
+      const root = document.getElementById("missionTasks");
+      const persistentRoot = document.getElementById("persistentMissionTasks");
+      clear(root);
+      clear(persistentRoot);
+      const board = homePayload.mission_board || {};
+      const tasks = Array.isArray(board.tasks) ? board.tasks : [];
+      const today = board.today || todayText();
+      document.getElementById("missionCount").textContent = `${tasks.length} open`;
+      document.getElementById("activeMissionCount").textContent = `${tasks.length} shown`;
+      document.getElementById("missionDueDate").value = today;
+      const todayDate = parseDateKey(today);
+      if (todayDate && !missionCalendarDate) {
+        missionCalendarDate = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
+      }
+      renderMissionCalendar(tasks, today);
+
+      const persistent = tasks.filter((task) => task.task_type !== "daily");
+      document.getElementById("persistentMissionCount").textContent = `${persistent.length} open`;
+      if (!persistent.length) {
+        persistentRoot.append(el("div", "row muted", "No persistent tasks."));
+      } else {
+        for (const task of persistent) persistentRoot.append(missionTaskRow(task, today, true));
+      }
+
+      if (!tasks.length) {
+        root.append(el("div", "row muted", "No open mission tasks."));
+        return;
+      }
+      for (const task of tasks) root.append(missionTaskRow(task, today));
     }
     function renderPairedDevices(devices) {
       const root = document.getElementById("pairedDevices");
@@ -1810,6 +1992,19 @@ DASHBOARD_HTML = """<!doctype html>
       render(await response.json());
     }
     document.getElementById("missionForm").addEventListener("submit", createMissionTask);
+    document.getElementById("missionCalendarPrev").addEventListener("click", () => {
+      missionCalendarDate = new Date(missionCalendarDate.getFullYear(), missionCalendarDate.getMonth() - 1, 1);
+      load();
+    });
+    document.getElementById("missionCalendarToday").addEventListener("click", () => {
+      const today = parseDateKey(todayText()) || new Date();
+      missionCalendarDate = new Date(today.getFullYear(), today.getMonth(), 1);
+      load();
+    });
+    document.getElementById("missionCalendarNext").addEventListener("click", () => {
+      missionCalendarDate = new Date(missionCalendarDate.getFullYear(), missionCalendarDate.getMonth() + 1, 1);
+      load();
+    });
     document.getElementById("openPairingForm").addEventListener("click", openPairingFormPanel);
     document.getElementById("closePairingForm").addEventListener("click", closePairingFormPanel);
     document.getElementById("pairingForm").addEventListener("submit", registerPairedDevice);
