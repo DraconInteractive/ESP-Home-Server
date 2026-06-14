@@ -1482,6 +1482,8 @@ DASHBOARD_HTML = """<!doctype html>
     const code = document.getElementById("code");
     const logoutButton = document.getElementById("logoutButton");
     const openHomeDevices = new Set();
+    const openRawReadouts = new Set();
+    let renderingDashboard = false;
     let renderingHomeDevices = false;
     let missionCalendarDate = new Date();
     missionCalendarDate.setDate(1);
@@ -1500,8 +1502,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (!value) return "";
       return new Date(value * 1000).toLocaleString();
     }
-    function jsonBlock(value) {
+    function jsonBlock(value, readoutKey = "") {
       const details = el("details", "raw");
+      if (readoutKey) details.open = openRawReadouts.has(readoutKey);
+      details.addEventListener("toggle", () => {
+        if (!readoutKey || renderingDashboard) return;
+        if (details.open) openRawReadouts.add(readoutKey);
+        else openRawReadouts.delete(readoutKey);
+      });
       details.append(el("summary", "", "Full readout"));
       const block = el("pre", "");
       block.textContent = JSON.stringify(value, null, 2);
@@ -1870,11 +1878,12 @@ DASHBOARD_HTML = """<!doctype html>
         meta.append(kv("Remote address", device.remote_addr));
         row.append(meta);
         if (device.notes) row.append(el("div", "muted meta-line", device.notes));
-        row.append(jsonBlock(device.payload || {}));
+        row.append(jsonBlock(device.payload || {}, `paired:${device.id || device.name || ""}`));
         root.append(row);
       }
     }
     function render(data) {
+      renderingDashboard = true;
       setAuthenticated(true);
       statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
       const summary = document.getElementById("summary");
@@ -1933,7 +1942,7 @@ DASHBOARD_HTML = """<!doctype html>
         meta.append(kv("Delivered", timeText(event.delivered_at)));
         meta.append(kv("Acked", timeText(event.acked_at)));
         row.append(meta);
-        row.append(jsonBlock(event.payload || {}));
+        row.append(jsonBlock(event.payload || {}, `event:${event.id || `${event.device_id}:${event.received_at}`}`));
         events.append(row);
       }
 
@@ -2012,7 +2021,7 @@ DASHBOARD_HTML = """<!doctype html>
         }
         row.append(meta);
         row.append(capabilityChips(device.capabilities));
-        row.append(jsonBlock(device));
+        row.append(jsonBlock(device, `home-device:${deviceKey}`));
         homeDevices.append(row);
       }
       setTimeout(() => { renderingHomeDevices = false; }, 0);
@@ -2043,9 +2052,10 @@ DASHBOARD_HTML = """<!doctype html>
         meta.append(kv("Status code", monitor.status_code));
         meta.append(kv("Enabled", monitor.enabled === false ? "no" : "yes"));
         row.append(meta);
-        row.append(jsonBlock(monitor));
+        row.append(jsonBlock(monitor, `uptime:${monitor.id || monitor.target || ""}`));
         uptimeMonitors.append(row);
       }
+      setTimeout(() => { renderingDashboard = false; }, 0);
     }
     async function load() {
       const response = await fetch("/dashboard-data", {cache: "no-store", headers: authHeaders()});
