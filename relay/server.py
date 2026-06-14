@@ -1117,7 +1117,36 @@ DASHBOARD_HTML = """<!doctype html>
       letter-spacing: 0.03em;
     }
     details.raw { margin-top: 10px; }
-    details.raw > summary { cursor: pointer; color: var(--muted); font-family: var(--mono); font-size: 0.74rem; }
+    details.raw > summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      list-style-position: outside;
+    }
+    .raw-summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .copy-button {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      vertical-align: middle;
+    }
+    .copy-button svg {
+      width: 15px;
+      height: 15px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
     pre {
       margin: 8px 0 0;
       max-height: 360px;
@@ -1502,6 +1531,43 @@ DASHBOARD_HTML = """<!doctype html>
       if (!value) return "";
       return new Date(value * 1000).toLocaleString();
     }
+    async function copyTextToClipboard(textValue, button) {
+      const originalTitle = button.title;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(textValue);
+        } else {
+          const area = document.createElement("textarea");
+          area.value = textValue;
+          area.setAttribute("readonly", "");
+          area.style.position = "fixed";
+          area.style.left = "-9999px";
+          document.body.append(area);
+          area.select();
+          document.execCommand("copy");
+          area.remove();
+        }
+        button.title = "Copied";
+      } catch (_error) {
+        button.title = "Copy failed";
+      }
+      setTimeout(() => { button.title = originalTitle; }, 1200);
+    }
+    function copyIcon() {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("aria-hidden", "true");
+      const rectBack = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rectBack.setAttribute("x", "8");
+      rectBack.setAttribute("y", "8");
+      rectBack.setAttribute("width", "12");
+      rectBack.setAttribute("height", "12");
+      rectBack.setAttribute("rx", "2");
+      const pathFront = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      pathFront.setAttribute("d", "M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2");
+      svg.append(rectBack, pathFront);
+      return svg;
+    }
     function jsonBlock(value, readoutKey = "") {
       const details = el("details", "raw");
       if (readoutKey) details.open = openRawReadouts.has(readoutKey);
@@ -1510,9 +1576,25 @@ DASHBOARD_HTML = """<!doctype html>
         if (details.open) openRawReadouts.add(readoutKey);
         else openRawReadouts.delete(readoutKey);
       });
-      details.append(el("summary", "", "Full readout"));
+      const textValue = JSON.stringify(value, null, 2);
+      const summary = el("summary", "");
+      const summaryContent = el("span", "raw-summary");
+      summaryContent.append(el("span", "", "Full readout"));
+      const copy = el("button", "copy-button");
+      copy.type = "button";
+      copy.title = "Copy full readout";
+      copy.setAttribute("aria-label", "Copy full readout");
+      copy.append(copyIcon());
+      copy.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        copyTextToClipboard(textValue, copy);
+      });
+      summaryContent.append(copy);
+      summary.append(summaryContent);
+      details.append(summary);
       const block = el("pre", "");
-      block.textContent = JSON.stringify(value, null, 2);
+      block.textContent = textValue;
       details.append(block);
       return details;
     }
