@@ -1,0 +1,52 @@
+{
+  "tasks": [
+    {
+      "id": "1062d3cb48624347be8ec98675cfe4b2",
+      "title": "Test 4",
+      "notes": "",
+      "task_type": "daily",
+      "status": "open",
+      "created_at": 1781421412,
+      "due_date": "2026-06-16",
+      "completed_at": null,
+      "completed_by": "",
+      "source": "relay"
+    },
+    {
+      "id": "1fc5eea648384a2b8ca26cfdd046e42f",
+      "title": "Test dated",
+      "notes": "",
+      "task_type": "daily",
+      "status": "completed",
+      "created_at": 1781420346,
+      "due_date": "2026-06-14",
+      "completed_at": 1781421403,
+      "completed_by": "relay-dashboard",
+      "source": "relay"
+    },
+    {
+      "id": "916f97d917df47208580153d56b00d8d",
+      "title": "Test Persistent",
+      "notes": "blah",
+      "task_type": "persistent",
+      "status": "open",
+      "created_at": 1781164759,
+      "due_date": null,
+      "completed_at": null,
+      "completed_by": "",
+      "source": "relay"
+    },
+    {
+      "id": "9406bb484b114eb284f51ed148281d94",
+      "title": "test 2",
+      "notes": "",
+      "task_type": "daily",
+      "status": "completed",
+      "created_at": 1781420888,
+      "due_date": "2026-06-14",
+      "completed_at": 1781421402,
+      "completed_by": "relay-dashboard",
+      "source": "relay"
+    }
+  ]
+}

@@ -3728,6 +3728,97 @@ DASHBOARD_HTML = """<!doctype html>
       align-items: center;
       flex-wrap: wrap;
     }
+    .mission-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 12px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .calendar-card {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      background: var(--panel);
+    }
+    .calendar-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .calendar-title {
+      font-family: var(--display);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--bright);
+    }
+    .calendar-controls { display: flex; gap: 6px; flex-wrap: wrap; }
+    .calendar-controls button { height: 30px; padding: 0 10px; }
+    .calendar-weekdays,
+    .calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 4px;
+    }
+    .calendar-weekdays {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10.5px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      text-align: center;
+    }
+    .calendar-day {
+      min-height: 88px;
+      min-width: 0;
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      background: var(--inset);
+    }
+    .calendar-day.outside { opacity: 0.45; }
+    .calendar-day.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent-soft); }
+    .calendar-date {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11.5px;
+      margin-bottom: 5px;
+    }
+    .calendar-day.today .calendar-date { color: var(--accent); }
+    .calendar-task {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin-top: 4px;
+      padding: 4px 5px;
+      border: 1px solid rgba(65, 214, 197, 0.28);
+      border-radius: 2px;
+      background: var(--accent-soft);
+      color: var(--bright);
+      font-family: var(--mono);
+      font-size: 10.5px;
+      line-height: 1.25;
+      overflow: hidden;
+      text-align: left;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .calendar-more {
+      margin-top: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10.5px;
+    }
+    .persistent-lane {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
     .filter-bar {
       display: grid;
       grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(150px, 200px));
@@ -3853,6 +3944,23 @@ DASHBOARD_HTML = """<!doctype html>
       box-shadow: 0 16px 50px rgba(0, 0, 0, 0.6);
       animation: deck-rise 0.25s ease-out;
     }
+    .modal.wide { width: min(620px, 100%); border-top-color: var(--accent); }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .modal-header h2 { margin: 0; }
+    .icon-button {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      font-family: var(--mono);
+      font-size: 15px;
+      line-height: 1;
+    }
     .modal h2 {
       margin: 0 0 8px;
       font-family: var(--display);
@@ -3878,7 +3986,8 @@ DASHBOARD_HTML = """<!doctype html>
     ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
     @media (max-width: 900px) {
       header { align-items: flex-start; flex-direction: column; }
-      .grid, .overview-grid { grid-template-columns: 1fr; }
+      .grid, .overview-grid, .mission-layout { grid-template-columns: 1fr; }
+      .calendar-day { min-height: 68px; padding: 5px; }
       .filter-bar { grid-template-columns: 1fr; }
       .device-summary { grid-template-columns: 1fr; }
       table, thead, tbody, th, td, tr { display: block; }
@@ -3976,25 +4085,35 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
     <section class="tab-panel" data-tab-panel="mission">
       <div class="panel">
-        <h2>Mission Board</h2>
-        <div class="events">
-          <div class="event">
-            <div class="device-id">Create task</div>
-            <form class="action-form" id="missionForm">
-              <input id="missionTitle" type="text" placeholder="Task title" autocomplete="off">
-              <select id="missionType">
-                <option value="persistent">Persistent</option>
-                <option value="daily">Today only</option>
-              </select>
-              <input id="missionDueDate" type="date">
-              <textarea id="missionNotes" placeholder="Notes, optional"></textarea>
-              <div class="action-row">
-                <button type="submit">Add</button>
-                <span class="meta" id="missionFormResult"></span>
-              </div>
-            </form>
+        <div class="panel-header">
+          <h2>Mission Board</h2>
+          <div class="action-row">
+            <span class="meta" id="missionCount"></span>
+            <button id="openMissionForm" type="button">Add Task</button>
           </div>
         </div>
+        <div class="mission-layout">
+          <section class="calendar-card" aria-label="Mission calendar">
+            <div class="calendar-head">
+              <div class="calendar-title" id="missionCalendarTitle">Calendar</div>
+              <div class="calendar-controls">
+                <button id="missionCalendarPrev" type="button">Prev</button>
+                <button id="missionCalendarToday" type="button">Today</button>
+                <button id="missionCalendarNext" type="button">Next</button>
+              </div>
+            </div>
+            <div class="calendar-weekdays" aria-hidden="true">
+              <div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div><div>Sun</div>
+            </div>
+            <div class="calendar-grid" id="missionCalendar"></div>
+          </section>
+          <section class="persistent-lane">
+            <div class="device-id">Persistent</div>
+            <div class="meta" id="persistentMissionCount"></div>
+            <div class="events" id="persistentMissionTasks"></div>
+          </section>
+        </div>
+        <div class="filter-meta">Open Tasks <span id="activeMissionCount"></span></div>
         <div class="events" id="missionTasks"></div>
       </div>
     </section>
@@ -4071,21 +4190,10 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
     <section class="tab-panel" data-tab-panel="uptime">
       <div class="panel">
-        <h2>Uptime Tracker</h2>
-        <div class="events">
-          <div class="event">
-            <div class="device-id">Register monitor</div>
-            <form class="action-form" id="uptimeForm">
-              <input id="uptimeId" type="hidden">
-              <input id="uptimeName" type="text" placeholder="Name, optional" autocomplete="off">
-              <input id="uptimeTarget" type="text" placeholder="IP, hostname, or https://example.com" autocomplete="off">
-              <input id="uptimeInterval" type="number" min="30" step="30" value="600" autocomplete="off">
-              <div class="action-row">
-                <button id="uptimeSubmitButton" type="submit">Add</button>
-                <button id="uptimeCancelEditButton" type="button">Cancel Edit</button>
-                <span class="meta" id="uptimeFormResult"></span>
-              </div>
-            </form>
+        <div class="panel-header">
+          <h2>Uptime Tracker</h2>
+          <div class="action-row">
+            <button id="openUptimeForm" type="button">Register</button>
           </div>
         </div>
         <div class="events" id="uptimeMonitors"></div>
@@ -4109,6 +4217,48 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
     </div>
   </div>
+  <div class="modal-backdrop" id="missionModal" role="dialog" aria-modal="true" aria-labelledby="missionModalTitle">
+    <div class="modal wide">
+      <div class="modal-header">
+        <h2 id="missionModalTitle">Add Task</h2>
+        <button id="closeMissionForm" class="icon-button" type="button" aria-label="Close add task modal">x</button>
+      </div>
+      <form class="action-form" id="missionForm">
+        <input id="missionTitle" type="text" placeholder="Task title" autocomplete="off">
+        <select id="missionType">
+          <option value="persistent">Persistent</option>
+          <option value="daily">Dated</option>
+        </select>
+        <input id="missionDueDate" type="date">
+        <textarea id="missionNotes" placeholder="Notes, optional"></textarea>
+        <div class="action-row">
+          <button type="submit">Create Task</button>
+          <button id="cancelMissionForm" type="button">Cancel</button>
+          <span class="meta" id="missionFormResult"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+  <div class="modal-backdrop" id="uptimeModal" role="dialog" aria-modal="true" aria-labelledby="uptimeModalTitle">
+    <div class="modal wide">
+      <div class="modal-header">
+        <h2 id="uptimeModalTitle">Register Monitor</h2>
+        <button id="closeUptimeForm" class="icon-button" type="button" aria-label="Close uptime monitor modal">x</button>
+      </div>
+      <form class="action-form" id="uptimeForm">
+        <input id="uptimeId" type="hidden">
+        <input id="uptimeName" type="text" placeholder="Name, optional" autocomplete="off">
+        <input id="uptimeTarget" type="text" placeholder="IP, hostname, or https://example.com" autocomplete="off">
+        <input id="uptimeInterval" type="number" min="30" step="30" value="600" autocomplete="off">
+        <div class="action-row">
+          <button id="uptimeSubmitButton" type="submit">Register</button>
+          <button id="uptimeCancelEditButton" type="button">Cancel Edit</button>
+          <button id="cancelUptimeForm" type="button">Cancel</button>
+          <span class="meta" id="uptimeFormResult"></span>
+        </div>
+      </form>
+    </div>
+  </div>
   <script>
     const state = {
       refreshMs: 5000,
@@ -4117,6 +4267,9 @@ DASHBOARD_HTML = """<!doctype html>
       devices: [],
       expandedDevices: new Set(),
     };
+    let missionCalendarDate = new Date();
+    missionCalendarDate.setDate(1);
+    let latestMissionToday = "";
 
     function text(value) {
       if (value === null || value === undefined || value === "") return "-";
@@ -4836,6 +4989,36 @@ DASHBOARD_HTML = """<!doctype html>
       return `${now.getFullYear()}-${month}-${day}`;
     }
 
+    function dateKey(date) {
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${date.getFullYear()}-${month}-${day}`;
+    }
+
+    function parseDateKey(value) {
+      const match = String(value || "").match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
+      if (!match) return null;
+      return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    }
+
+    function monthTitle(date) {
+      return date.toLocaleDateString(undefined, {month: "long", year: "numeric"});
+    }
+
+    function openMissionFormModal() {
+      document.getElementById("missionFormResult").textContent = "";
+      if (!document.getElementById("missionDueDate").value) {
+        document.getElementById("missionDueDate").value = latestMissionToday || todayText();
+      }
+      document.getElementById("missionModal").classList.add("open");
+      document.getElementById("missionTitle").focus();
+    }
+
+    function closeMissionFormModal() {
+      document.getElementById("missionModal").classList.remove("open");
+      document.getElementById("missionFormResult").textContent = "";
+    }
+
     async function createMissionTask(event) {
       event.preventDefault();
       const result = document.getElementById("missionFormResult");
@@ -4856,7 +5039,10 @@ DASHBOARD_HTML = """<!doctype html>
         if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
         document.getElementById("missionTitle").value = "";
         document.getElementById("missionNotes").value = "";
+        document.getElementById("missionDueDate").value = latestMissionToday || todayText();
+        document.getElementById("missionType").value = "persistent";
         result.textContent = "Added";
+        closeMissionFormModal();
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         await refresh();
       } catch (error) {
@@ -4886,29 +5072,87 @@ DASHBOARD_HTML = """<!doctype html>
       button.disabled = false;
     }
 
-    function renderMissionBoard(board) {
-      const root = document.getElementById("missionTasks");
-      root.replaceChildren();
-      const tasks = Array.isArray(board?.tasks) ? board.tasks : [];
-      document.getElementById("missionDueDate").value = board?.today || todayText();
-      if (!tasks.length) {
-        root.append(el("div", "empty", "No open mission tasks."));
-        return;
-      }
-      for (const task of tasks) {
+    function missionTaskItem(task, today, compact = false) {
         const item = el("div", "event");
         item.append(el("div", "device-id", text(task.title)));
-        item.append(el("div", "meta", task.task_type === "daily" ? `today only | ${text(task.due_date)}` : "persistent"));
+        item.append(el("div", "meta", task.task_type === "daily" ? `dated | ${text(task.due_date || today)}` : "persistent"));
         if (task.notes) item.append(el("div", "", text(task.notes)));
-        item.append(el("div", "meta", `${text(task.id)} | source ${text(task.source)} | created ${new Date((task.created_at || 0) * 1000).toLocaleString()}`));
+        if (!compact) {
+          item.append(el("div", "meta", `${text(task.id)} | source ${text(task.source)} | created ${new Date((task.created_at || 0) * 1000).toLocaleString()}`));
+        }
         const row = el("div", "action-row");
         const complete = el("button", "", "Complete");
         complete.type = "button";
         complete.addEventListener("click", () => completeMissionTask(task.id, complete));
         row.append(complete);
         item.append(row);
-        root.append(item);
+        return item;
+    }
+
+    function renderMissionCalendar(tasks, today) {
+      const root = document.getElementById("missionCalendar");
+      root.replaceChildren();
+      document.getElementById("missionCalendarTitle").textContent = monthTitle(missionCalendarDate);
+      const year = missionCalendarDate.getFullYear();
+      const month = missionCalendarDate.getMonth();
+      const first = new Date(year, month, 1);
+      const start = new Date(first);
+      start.setDate(first.getDate() - ((first.getDay() + 6) % 7));
+      const byDate = new Map();
+      for (const task of tasks) {
+        if (task.task_type !== "daily") continue;
+        const key = task.due_date || today;
+        if (!byDate.has(key)) byDate.set(key, []);
+        byDate.get(key).push(task);
       }
+      for (let index = 0; index < 42; index += 1) {
+        const date = new Date(start);
+        date.setDate(start.getDate() + index);
+        const key = dateKey(date);
+        const day = el("div", `calendar-day${date.getMonth() === month ? "" : " outside"}${key === today ? " today" : ""}`);
+        day.append(el("div", "calendar-date", String(date.getDate())));
+        const dayTasks = byDate.get(key) || [];
+        for (const task of dayTasks.slice(0, 3)) {
+          const item = el("button", "calendar-task", task.title || "Untitled task");
+          item.type = "button";
+          item.title = task.notes ? `${task.title || "Untitled task"} - ${task.notes}` : (task.title || "Untitled task");
+          item.addEventListener("click", () => setActiveTab("mission"));
+          day.append(item);
+        }
+        if (dayTasks.length > 3) day.append(el("div", "calendar-more", `+${dayTasks.length - 3} more`));
+        root.append(day);
+      }
+    }
+
+    function renderMissionBoard(board) {
+      const root = document.getElementById("missionTasks");
+      const persistentRoot = document.getElementById("persistentMissionTasks");
+      root.replaceChildren();
+      persistentRoot.replaceChildren();
+      const tasks = Array.isArray(board?.tasks) ? board.tasks : [];
+      const today = board?.today || todayText();
+      latestMissionToday = today;
+      document.getElementById("missionCount").textContent = `${tasks.length} open`;
+      document.getElementById("activeMissionCount").textContent = `${tasks.length} shown`;
+      const todayDate = parseDateKey(today);
+      if (todayDate && !missionCalendarDate) {
+        missionCalendarDate = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
+      }
+      renderMissionCalendar(tasks, today);
+
+      const persistent = tasks.filter((task) => task.task_type !== "daily");
+      document.getElementById("persistentMissionCount").textContent = `${persistent.length} open`;
+      if (!persistent.length) {
+        persistentRoot.append(el("div", "empty", "No persistent tasks."));
+      } else {
+        for (const task of persistent) persistentRoot.append(missionTaskItem(task, today, true));
+      }
+
+      if (!tasks.length) {
+        root.append(el("div", "empty", "No open mission tasks."));
+        return;
+      }
+      for (const task of tasks) root.append(missionTaskItem(task, today));
     }
 
     async function createTimer(event) {
@@ -5006,10 +5250,21 @@ DASHBOARD_HTML = """<!doctype html>
         if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
         resetUptimeForm();
         result.textContent = payload.id ? "Saved" : "Added";
+        closeUptimeFormModal();
         await refresh();
       } catch (error) {
         result.textContent = error.message;
       }
+    }
+
+    function openUptimeFormModal() {
+      document.getElementById("uptimeModal").classList.add("open");
+      document.getElementById("uptimeName").focus();
+    }
+
+    function closeUptimeFormModal() {
+      document.getElementById("uptimeModal").classList.remove("open");
+      document.getElementById("uptimeFormResult").textContent = "";
     }
 
     function resetUptimeForm() {
@@ -5017,7 +5272,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("uptimeName").value = "";
       document.getElementById("uptimeTarget").value = "";
       document.getElementById("uptimeInterval").value = "600";
-      document.getElementById("uptimeSubmitButton").textContent = "Add";
+      document.getElementById("uptimeSubmitButton").textContent = "Register";
       document.getElementById("uptimeCancelEditButton").style.display = "none";
     }
 
@@ -5030,6 +5285,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("uptimeCancelEditButton").style.display = "";
       document.getElementById("uptimeFormResult").textContent = "";
       setActiveTab("uptime");
+      openUptimeFormModal();
       document.getElementById("uptimeInterval").focus();
     }
 
@@ -5356,10 +5612,46 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("simulateButton").addEventListener("click", simulateTranscript);
     document.getElementById("restartButton").addEventListener("click", restartServer);
     document.getElementById("missionForm").addEventListener("submit", createMissionTask);
+    document.getElementById("openMissionForm").addEventListener("click", openMissionFormModal);
+    document.getElementById("closeMissionForm").addEventListener("click", closeMissionFormModal);
+    document.getElementById("cancelMissionForm").addEventListener("click", closeMissionFormModal);
+    document.getElementById("missionModal").addEventListener("click", (event) => {
+      if (event.target.id === "missionModal") closeMissionFormModal();
+    });
+    document.getElementById("missionCalendarPrev").addEventListener("click", () => {
+      missionCalendarDate = new Date(missionCalendarDate.getFullYear(), missionCalendarDate.getMonth() - 1, 1);
+      refresh();
+    });
+    document.getElementById("missionCalendarToday").addEventListener("click", () => {
+      const today = parseDateKey(todayText()) || new Date();
+      missionCalendarDate = new Date(today.getFullYear(), today.getMonth(), 1);
+      refresh();
+    });
+    document.getElementById("missionCalendarNext").addEventListener("click", () => {
+      missionCalendarDate = new Date(missionCalendarDate.getFullYear(), missionCalendarDate.getMonth() + 1, 1);
+      refresh();
+    });
     document.getElementById("missionDueDate").value = todayText();
     document.getElementById("timerForm").addEventListener("submit", createTimer);
     document.getElementById("uptimeForm").addEventListener("submit", createUptimeMonitor);
-    document.getElementById("uptimeCancelEditButton").addEventListener("click", resetUptimeForm);
+    document.getElementById("openUptimeForm").addEventListener("click", () => {
+      resetUptimeForm();
+      openUptimeFormModal();
+    });
+    document.getElementById("closeUptimeForm").addEventListener("click", closeUptimeFormModal);
+    document.getElementById("cancelUptimeForm").addEventListener("click", closeUptimeFormModal);
+    document.getElementById("uptimeCancelEditButton").addEventListener("click", () => {
+      resetUptimeForm();
+      closeUptimeFormModal();
+    });
+    document.getElementById("uptimeModal").addEventListener("click", (event) => {
+      if (event.target.id === "uptimeModal") closeUptimeFormModal();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (document.getElementById("missionModal").classList.contains("open")) closeMissionFormModal();
+      if (document.getElementById("uptimeModal").classList.contains("open")) closeUptimeFormModal();
+    });
     document.getElementById("simulateTranscript").addEventListener("keydown", (event) => {
       if (event.key === "Enter") simulateTranscript();
     });
