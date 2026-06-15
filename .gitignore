@@ -14,6 +14,10 @@ server/server-state.sqlite3
 server/server-state.sqlite3-*
 server/firmware-catalog.json
 server/firmware-catalog/
+relay/.env.local
+relay/device-tokens.json
+relay/relay-state.sqlite3
+relay/relay-state.sqlite3-*
 
 # ESP-IDF generated files and local configuration
 firmware/build/

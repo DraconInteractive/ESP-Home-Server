@@ -1,8 +1,9 @@
 # External Relay Plan
 
-This note captures the current thinking for exposing a limited external view of
-the spoken-command/device network without exposing the local command server
-directly.
+This note captures the relay architecture for exposing a limited external view
+of the spoken-command/device network without exposing the local command server
+directly. The first relay implementation now exists in `relay/`; this document
+keeps the original design intent and records the current implemented behavior.
 
 ## Goal
 
@@ -36,7 +37,8 @@ opened.
 
 ## External Dashboard Scope
 
-The public dashboard should initially be read-only:
+The public dashboard is intentionally narrower than the local dashboard. It can
+show:
 
 - device list
 - online/offline state
@@ -46,8 +48,10 @@ The public dashboard should initially be read-only:
 - last seen
 - battery state
 - recent events/logs
+- mission-board state published by the home server
+- paired trusted computer/server connection details, after dashboard auth
 
-It should not expose:
+It must not expose:
 
 - simulated transcripts
 - shell/server actions
@@ -57,8 +61,10 @@ It should not expose:
 - arbitrary device event injection
 - unrestricted media proxying
 
-Camera thumbnails or streams can be considered later, but should be treated as a
-separate security review.
+The relay dashboard may enqueue mission-board task creates/completions. The home
+server remains the canonical owner of task state and publishes the resulting
+board back to the relay snapshot. Camera thumbnails or streams can be considered
+later, but should be treated as a separate security review.
 
 ## Remote Device Registration
 
@@ -66,11 +72,14 @@ Remote devices should register directly with the relay:
 
 ```text
 POST https://relay.example.com/devices/{device_id}/register
+POST https://relay.example.com/devices/{device_id}/status
 POST https://relay.example.com/devices/{device_id}/button
 ```
 
-The relay stores the event. The home command server then consumes it and feeds it
-into the existing local event-rule system.
+The relay stores registration and button events. The home command server then
+consumes them and feeds them into the existing local device and event-rule
+system. Status updates are stored on the relay and synced separately through the
+dirty-status endpoint.
 
 Initial event flow:
 
@@ -93,9 +102,11 @@ Use separate credentials for each role:
 
 - dashboard/admin auth for browser access
 - home-server sync token
+- IP-pairing token for trusted computers/servers
+- one-time device enrollment token
 - per-device token for remote ESP devices
 
-Each remote device should have its own long random secret:
+Each remote device has its own long random secret:
 
 ```json
 {
@@ -104,11 +115,15 @@ Each remote device should have its own long random secret:
 }
 ```
 
-Initial device auth can use:
+Device auth currently uses:
 
 ```http
 Authorization: Bearer <device_secret>
 ```
+
+Dashboard auth supports either a long dashboard token or temporary browser
+sessions created by an 8-digit ntfy phone code. The phone-code path is a
+convenience login, not a replacement for protecting the relay and ntfy topic.
 
 Later hardening can move to request signing with HMAC over the request body and
 timestamp.
@@ -220,7 +235,10 @@ Initial relay endpoints:
 GET  /dashboard
 GET  /dashboard-data
 POST /devices/{device_id}/register
+POST /devices/{device_id}/status
 POST /devices/{device_id}/button
+POST /sync/dashboard-snapshot
+GET  /sync/device-statuses
 GET  /sync/events
 POST /sync/events/{event_id}/ack
 ```
@@ -241,4 +259,21 @@ The first remote-device test target should be one of the XIAO button devices.
 - The local server relay worker is controlled by `COMMAND_SERVER_RELAY_ENABLED`,
   `COMMAND_SERVER_RELAY_URL`, and `COMMAND_SERVER_RELAY_SYNC_TOKEN`.
 - The local server pushes a reduced dashboard snapshot and polls/acks remote
-  `register` and `button` events.
+  `register`, `status`, `button`, and mission-board events.
+- The relay stores runtime state in SQLite and device secrets in
+  `device-tokens.json`.
+- The dashboard supports temporary ntfy phone-code sessions when configured.
+- IP pairing lets trusted full computers or servers publish their current
+  external IP, local IPs, ports, hostname, and notes for authenticated dashboard
+  lookup.
+
+## Remaining Hardening
+
+- Add relay-side rate limits for registration, status, button, dashboard auth,
+  and mission-board mutation endpoints.
+- Add a documented token-rotation process for dashboard, sync, pairing,
+  enrollment, and per-device secrets.
+- Consider storing per-device token hashes instead of raw bearer tokens.
+- Keep audit logs or summaries for public device events and dashboard mutations.
+- Keep media proxying and camera streams out of the relay until they have a
+  separate security review.

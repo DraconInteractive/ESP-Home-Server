@@ -227,6 +227,9 @@ the events table exceeds that count, the relay deletes acked events oldest-first
 until the table is back under the limit. Unacked events are never pruned by this
 retention pass.
 
+See `../docs/relay-runbook.md` for runtime file handling, backups, token
+rotation, health checks, and recovery notes.
+
 ## Updating The VPS From Git
 
 Keep `/opt/spoken-command-relay` as the runtime directory. It contains
