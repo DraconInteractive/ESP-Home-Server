@@ -39,7 +39,16 @@ install -m 0644 "$REPO_DIR/relay/server.py" "$APP_DIR/server.py"
 install -m 0644 "$REPO_DIR/relay/.env.example" "$APP_DIR/.env.example"
 install -m 0755 "$REPO_DIR/relay/install-relay-service.sh" "$APP_DIR/install-relay-service.sh"
 
-python3 -m py_compile "$APP_DIR/server.py"
+# Application package (replace wholesale so removed modules do not linger).
+rm -rf "$APP_DIR/relay_app"
+install -d -m 0750 "$APP_DIR/relay_app"
+install -m 0644 "$REPO_DIR/relay/relay_app"/*.py "$APP_DIR/relay_app/"
+
+# Static dashboard assets.
+install -d -m 0750 "$APP_DIR/static"
+install -m 0644 "$REPO_DIR/relay/static"/* "$APP_DIR/static/"
+
+python3 -m py_compile "$APP_DIR/server.py" "$APP_DIR/relay_app"/*.py
 
 chown -R relay:relay "$APP_DIR"
 chmod 750 "$APP_DIR"

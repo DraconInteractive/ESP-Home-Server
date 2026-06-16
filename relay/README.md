@@ -6,6 +6,31 @@ The relay is intentionally narrower than the local command server. It accepts
 authenticated remote device registrations and button events, queues those events
 for the home server, and serves a read-only dashboard snapshot.
 
+## Layout
+
+`server.py` is a thin entrypoint. The implementation lives in the `relay_app`
+package next to it, and the dashboard UI is a static asset:
+
+```text
+relay/
+  server.py            # entrypoint: main() + server bootstrap
+  relay_app/
+    config.py          # environment settings and the shared STATE_LOCK
+    util.py            # pure helpers (input sanitisers, JSON coercion)
+    db.py              # SQLite connection (WAL) and schema init
+    auth.py            # tokens, dashboard codes/sessions, ntfy, device-token cache
+    http_util.py       # HTTP request/response helpers
+    store.py           # device/event/paired/snapshot persistence
+    dashboard.py       # loads the dashboard HTML asset
+    handler.py         # route dispatch (do_GET / do_POST)
+  static/
+    dashboard.html     # dashboard UI (HTML + CSS + JS)
+```
+
+Running `python3 server.py` from the `relay/` directory puts that directory on
+`sys.path`, so `import relay_app` resolves. All three of `server.py`,
+`relay_app/`, and `static/` must be deployed together.
+
 ## Run Locally
 
 ```sh
@@ -250,6 +275,7 @@ sudo ./relay/update-relay-from-git.sh main
 ```
 
 The updater fetches `origin` as the SSH user that invoked `sudo`, fast-forwards
-the checkout, copies the relay app files into `/opt/spoken-command-relay`,
-compiles `server.py`, restarts `spoken-command-relay`, and checks the local
-health endpoint.
+the checkout, copies `server.py`, the `relay_app/` package, and the `static/`
+assets into `/opt/spoken-command-relay` (replacing `relay_app/` wholesale so
+removed modules do not linger), byte-compiles `server.py` and the package,
+restarts `spoken-command-relay`, and checks the local health endpoint.

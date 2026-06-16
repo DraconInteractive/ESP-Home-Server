@@ -1,0 +1,1353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dracon Relay</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "IBM Plex Sans", system-ui, "Segoe UI", sans-serif;
+      --bg: #0f0c08;
+      --panel: #181310;
+      --panel-soft: #110d0a;
+      --raised: #211a14;
+      --text: #ece4d8;
+      --bright: #faf5ec;
+      --muted: #9b8d7a;
+      --border: #2e2519;
+      --border-bright: #473a25;
+      --accent: #f0a839;
+      --accent-soft: rgba(240, 168, 57, 0.13);
+      --accent-glow: rgba(240, 168, 57, 0.35);
+      --warn: #ffd166;
+      --warn-soft: rgba(255, 209, 102, 0.12);
+      --ok: #6bd58c;
+      --ok-soft: rgba(107, 213, 140, 0.12);
+      --bad: #ff7a64;
+      --bad-soft: rgba(255, 122, 100, 0.12);
+      --display: "Chakra Petch", "Segoe UI", sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(1100px 520px at 80% -10%, rgba(240, 168, 57, 0.07), transparent 60%),
+        radial-gradient(800px 460px at -10% 110%, rgba(240, 168, 57, 0.04), transparent 55%),
+        repeating-linear-gradient(0deg, rgba(240, 168, 57, 0.02) 0 1px, transparent 1px 28px),
+        repeating-linear-gradient(90deg, rgba(240, 168, 57, 0.02) 0 1px, transparent 1px 28px),
+        var(--bg);
+      background-attachment: fixed;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    ::selection { background: var(--accent); color: #2b1c04; }
+    @keyframes beacon-rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes beacon-pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 12px var(--accent-glow); }
+      50% { opacity: 0.55; box-shadow: 0 0 4px var(--accent-glow); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+    header {
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(24, 19, 16, 0.97), rgba(24, 19, 16, 0.9));
+      backdrop-filter: blur(6px);
+      box-shadow: 0 1px 0 rgba(240, 168, 57, 0.16), 0 12px 30px rgba(8, 5, 2, 0.5);
+      animation: beacon-rise 0.4s ease-out backwards;
+    }
+    .header-inner {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 22px 24px 36px;
+      animation: beacon-rise 0.5s ease-out 0.1s backwards;
+    }
+    h1 {
+      margin: 0;
+      font-family: var(--display);
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--bright);
+    }
+    h1::before {
+      content: "";
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 12px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: beacon-pulse 2.8s ease-in-out infinite;
+      vertical-align: 1px;
+    }
+    h2 {
+      margin: 0;
+      font-family: var(--display);
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+    h2::before { content: "// "; color: var(--border-bright); }
+    .muted {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+    }
+    .top-status {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px;
+      margin: 20px 0 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab-button {
+      border: 0;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      background: transparent;
+      height: 36px;
+      padding: 0 14px;
+      font-family: var(--display);
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .tab-button:hover { color: var(--text); border-color: var(--border-bright); box-shadow: none; }
+    .tab-button.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: linear-gradient(180deg, transparent 55%, var(--accent-soft));
+      text-shadow: 0 0 14px var(--accent-glow);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .stat, .row {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: linear-gradient(180deg, var(--raised) 0%, var(--panel) 70%);
+    }
+    .stat {
+      padding: 13px 14px;
+      border-top: 1px solid var(--border-bright);
+      clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
+      position: relative;
+      animation: beacon-rise 0.45s ease-out backwards;
+    }
+    .stat:nth-child(2) { animation-delay: 0.05s; }
+    .stat:nth-child(3) { animation-delay: 0.1s; }
+    .stat:nth-child(4) { animation-delay: 0.15s; }
+    .stat:nth-child(5) { animation-delay: 0.2s; }
+    .stat:nth-child(6) { animation-delay: 0.25s; }
+    .stat::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: linear-gradient(180deg, var(--accent), transparent 85%);
+      opacity: 0.85;
+    }
+    .stat strong {
+      display: block;
+      font-family: var(--display);
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-top: 4px;
+      color: var(--bright);
+      text-shadow: 0 0 18px var(--accent-soft);
+    }
+    .stat span {
+      font-family: var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.66rem;
+      color: var(--muted);
+    }
+    .rows { display: grid; gap: 8px; }
+    .section-title {
+      margin: 24px 0 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .section-title .muted { font-size: 0.74rem; }
+    details.panel { margin-top: 24px; }
+    details.panel > summary { cursor: pointer; list-style-position: outside; color: var(--accent); }
+    details.panel > summary .section-title {
+      display: inline-flex;
+      width: calc(100% - 22px);
+      margin: 0 0 10px 4px;
+      vertical-align: middle;
+    }
+    .row { padding: 12px 14px; transition: border-color 0.15s; }
+    .row:hover { border-color: var(--border-bright); }
+    .row-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .row-title { min-width: 0; }
+    .row-title strong { overflow-wrap: anywhere; color: var(--bright); }
+    .meta-line { margin-top: 3px; }
+    .device-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+      gap: 6px 14px;
+      margin-top: 10px;
+    }
+    .kv { min-width: 0; }
+    .kv span {
+      display: block;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+    .kv strong {
+      display: block;
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      overflow-wrap: anywhere;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 2px;
+      border: 1px solid transparent;
+      padding: 3px 8px;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .pill.ok { color: var(--ok); background: var(--ok-soft); border-color: rgba(107, 213, 140, 0.3); }
+    .pill.warn { color: var(--warn); background: var(--warn-soft); border-color: rgba(255, 209, 102, 0.3); }
+    .pill.bad { color: var(--bad); background: var(--bad-soft); border-color: rgba(255, 122, 100, 0.3); }
+    .pill.neutral { color: var(--accent); background: var(--accent-soft); border-color: rgba(240, 168, 57, 0.3); }
+    .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+    .chip {
+      border: 1px solid var(--border-bright);
+      border-radius: 2px;
+      padding: 2px 7px;
+      color: var(--muted);
+      background: var(--panel-soft);
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.03em;
+    }
+    details.raw { margin-top: 10px; }
+    details.raw > summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      list-style-position: outside;
+    }
+    .raw-summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .copy-button {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      vertical-align: middle;
+    }
+    .copy-button svg {
+      width: 15px;
+      height: 15px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    pre {
+      margin: 8px 0 0;
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 10px;
+      color: var(--accent);
+    }
+    code { font-family: var(--mono); }
+    button, input { font: inherit; }
+    input {
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--border-bright);
+      border-radius: 3px;
+      background: var(--raised);
+      color: var(--text);
+    }
+    select, textarea {
+      min-width: 0;
+      font: inherit;
+      padding: 8px 10px;
+      border: 1px solid var(--border-bright);
+      border-radius: 3px;
+      background: var(--raised);
+      color: var(--text);
+    }
+    input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.7; }
+    input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
+      outline: 1px solid var(--accent);
+      outline-offset: 1px;
+    }
+    #token { min-width: 260px; }
+    textarea { min-height: 72px; resize: vertical; }
+    button {
+      padding: 8px 12px;
+      border: 1px solid var(--border-bright);
+      border-radius: 3px;
+      background: var(--raised);
+      color: var(--text);
+      cursor: pointer;
+      font-family: var(--display);
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      transition: border-color 0.15s, box-shadow 0.15s, color 0.15s;
+    }
+    button:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 10px var(--accent-soft);
+    }
+    .action-form { display: grid; gap: 8px; }
+    .form-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 150px) minmax(0, 160px);
+      gap: 8px;
+    }
+    #missionForm input, #missionForm select, #missionForm textarea { width: 100%; max-width: 100%; }
+    .mission-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.75fr);
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .calendar-card {
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: linear-gradient(180deg, var(--raised) 0%, var(--panel) 70%);
+    }
+    .calendar-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .calendar-title {
+      font-family: var(--display);
+      font-size: 0.86rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--bright);
+    }
+    .calendar-controls { display: flex; gap: 6px; flex-wrap: wrap; }
+    .calendar-controls button { height: 30px; padding: 0 10px; }
+    .calendar-weekdays,
+    .calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 4px;
+    }
+    .calendar-weekdays {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      text-align: center;
+    }
+    .calendar-day {
+      min-height: 88px;
+      min-width: 0;
+      padding: 7px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--panel-soft);
+    }
+    .calendar-day.outside { opacity: 0.45; }
+    .calendar-day.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px rgba(240, 168, 57, 0.18); }
+    .calendar-date {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      margin-bottom: 5px;
+    }
+    .calendar-day.today .calendar-date { color: var(--accent); }
+    .calendar-task {
+      display: block;
+      width: 100%;
+      margin-top: 4px;
+      padding: 4px 5px;
+      border: 1px solid rgba(240, 168, 57, 0.3);
+      border-radius: 2px;
+      background: var(--accent-soft);
+      color: var(--bright);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      line-height: 1.25;
+      overflow: hidden;
+      text-align: left;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .calendar-more {
+      margin-top: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+    }
+    .persistent-lane {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+    .pairing-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    #pairingForm input, #pairingForm select, #pairingForm textarea { width: 100%; max-width: 100%; }
+    .form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .auth-panel {
+      margin-top: 16px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--accent);
+      border-radius: 4px;
+      background: linear-gradient(180deg, var(--raised) 0%, var(--panel) 70%);
+    }
+    .auth-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .auth-row input { min-width: 180px; }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(8, 5, 2, 0.72);
+      backdrop-filter: blur(4px);
+      z-index: 20;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      width: min(620px, 100%);
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+      padding: 16px;
+      border: 1px solid var(--border-bright);
+      border-top: 2px solid var(--accent);
+      border-radius: 4px;
+      background: linear-gradient(180deg, var(--raised) 0%, var(--panel) 70%);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.56);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .icon-button {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      font-family: var(--mono);
+      font-size: 1rem;
+      line-height: 1;
+    }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 5px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+    @media (max-width: 680px) {
+      .header-inner { align-items: flex-start; flex-direction: column; }
+      .top-status { justify-content: flex-start; text-align: left; }
+      main { padding-inline: 14px; }
+      .form-grid, .pairing-grid, .mission-layout { grid-template-columns: 1fr; }
+      .calendar-day { min-height: 68px; padding: 5px; }
+      .row-head, .section-title { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div>
+        <h1>Dracon Relay</h1>
+        <div class="muted">Public relay and home sync status</div>
+      </div>
+      <div class="muted top-status">
+        <span id="status">Loading...</span>
+        <button id="logoutButton" type="button" hidden>Logout</button>
+      </div>
+    </div>
+  </header>
+  <main>
+    <section id="auth" class="auth-panel" hidden>
+      <h2>Dashboard Access</h2>
+      <div class="muted" id="authMessage">Request a temporary code on your phone.</div>
+      <div class="auth-row">
+        <button id="requestCodeButton" type="button">Send Phone Code</button>
+        <input id="code" type="text" inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="8-digit code">
+        <button id="verifyCodeButton" type="button">Verify</button>
+      </div>
+      <form id="tokenAuth" class="auth-row">
+        <input id="token" type="password" autocomplete="current-password" placeholder="Dashboard token">
+        <button type="submit">Save Token</button>
+      </form>
+    </section>
+    <section class="grid" id="summary"></section>
+    <nav class="tabs" aria-label="Relay dashboard sections">
+      <button class="tab-button active" type="button" data-tab="events">Events</button>
+      <button class="tab-button" type="button" data-tab="mission">Mission</button>
+      <button class="tab-button" type="button" data-tab="pairing">Pairing</button>
+      <button class="tab-button" type="button" data-tab="devices">Devices</button>
+      <button class="tab-button" type="button" data-tab="uptime">Uptime</button>
+    </nav>
+    <section class="tab-panel active" data-tab-panel="events">
+      <div class="section-title"><h2>Recent Relay Events</h2><span class="muted" id="relayEventCount"></span></div>
+      <section class="rows" id="events"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="mission">
+      <div class="section-title">
+        <h2>Mission Board</h2>
+        <div class="form-actions">
+          <span class="muted" id="missionCount"></span>
+          <button id="openMissionForm" type="button">Add Task</button>
+        </div>
+      </div>
+      <div class="mission-layout">
+        <section class="calendar-card" aria-label="Mission calendar">
+          <div class="calendar-head">
+            <div class="calendar-title" id="missionCalendarTitle">Calendar</div>
+            <div class="calendar-controls">
+              <button id="missionCalendarPrev" type="button">Prev</button>
+              <button id="missionCalendarToday" type="button">Today</button>
+              <button id="missionCalendarNext" type="button">Next</button>
+            </div>
+          </div>
+          <div class="calendar-weekdays" aria-hidden="true">
+            <div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div><div>Sun</div>
+          </div>
+          <div class="calendar-grid" id="missionCalendar"></div>
+        </section>
+        <section class="persistent-lane">
+          <div class="section-title"><h2>Persistent</h2><span class="muted" id="persistentMissionCount"></span></div>
+          <section class="rows" id="persistentMissionTasks"></section>
+        </section>
+      </div>
+      <div class="section-title"><h2>Open Tasks</h2><span class="muted" id="activeMissionCount"></span></div>
+      <section class="rows" id="missionTasks"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="pairing">
+      <div class="section-title">
+        <h2>IP Pairing</h2>
+        <div class="form-actions">
+          <span class="muted" id="pairedDeviceCount"></span>
+          <button id="openPairingForm" type="button">Register</button>
+        </div>
+      </div>
+      <div class="row" id="pairingFormPanel" hidden>
+        <form class="action-form" id="pairingForm">
+          <div class="pairing-grid">
+            <input id="pairingDeviceId" type="text" placeholder="Device ID" autocomplete="off">
+            <input id="pairingName" type="text" placeholder="Name" autocomplete="off">
+            <input id="pairingType" type="text" placeholder="Type, e.g. windows-pc" autocomplete="off">
+            <input id="pairingHostname" type="text" placeholder="Hostname" autocomplete="off">
+            <input id="pairingLocalIps" type="text" placeholder="Local IPs, comma separated" autocomplete="off">
+            <input id="pairingExternalIp" type="text" placeholder="External IP" autocomplete="off">
+            <input id="pairingPorts" type="text" placeholder="Ports, e.g. ssh:22,rdp:3389" autocomplete="off">
+          </div>
+          <textarea id="pairingNotes" placeholder="Notes, optional"></textarea>
+          <div class="form-actions">
+            <button type="submit">Save Pairing</button>
+            <button id="closePairingForm" type="button">Cancel</button>
+            <span class="muted" id="pairingFormResult"></span>
+          </div>
+        </form>
+      </div>
+      <section class="rows" id="pairedDevices"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="devices">
+      <div class="section-title"><h2>Remote Devices</h2><span class="muted" id="remoteDeviceCount"></span></div>
+      <section class="rows" id="devices"></section>
+      <div class="section-title"><h2>Home Devices</h2><span class="muted" id="homeDeviceCount"></span></div>
+      <section class="rows" id="homeDevices"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="uptime">
+      <div class="section-title"><h2>Home Snapshot</h2><span class="muted" id="homeSnapshotAge"></span></div>
+      <section class="rows" id="home"></section>
+      <div class="section-title"><h2>Uptime Checks</h2><span class="muted" id="uptimeCount"></span></div>
+      <section class="rows" id="uptimeMonitors"></section>
+    </section>
+  </main>
+  <div class="modal-backdrop" id="missionModal" role="dialog" aria-modal="true" aria-labelledby="missionModalTitle">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="missionModalTitle">Add Task</h2>
+        <button id="closeMissionForm" class="icon-button" type="button" aria-label="Close add task modal">x</button>
+      </div>
+      <form class="action-form" id="missionForm">
+        <div class="form-grid">
+          <input id="missionTitle" type="text" placeholder="Task title" autocomplete="off">
+          <select id="missionType">
+            <option value="persistent">Persistent</option>
+            <option value="daily">Dated</option>
+          </select>
+          <input id="missionDueDate" type="date">
+        </div>
+        <textarea id="missionNotes" placeholder="Notes, optional"></textarea>
+        <div class="form-actions">
+          <button type="submit">Create Task</button>
+          <button id="cancelMissionForm" type="button">Cancel</button>
+          <span class="muted" id="missionFormResult"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script>
+    const tokenKey = "draconRelayDashboardToken";
+    const tabKey = "draconRelayDashboardTab";
+    const statusEl = document.getElementById("status");
+    const auth = document.getElementById("auth");
+    const authMessage = document.getElementById("authMessage");
+    const token = document.getElementById("token");
+    const code = document.getElementById("code");
+    const logoutButton = document.getElementById("logoutButton");
+    const openHomeDevices = new Set();
+    const openRawReadouts = new Set();
+    let renderingDashboard = false;
+    let renderingHomeDevices = false;
+    let missionCalendarDate = new Date();
+    missionCalendarDate.setDate(1);
+    let latestMissionToday = todayText();
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+    function clear(node) {
+      while (node.firstChild) node.removeChild(node.firstChild);
+    }
+    function timeText(value) {
+      if (!value) return "";
+      return new Date(value * 1000).toLocaleString();
+    }
+    async function copyTextToClipboard(textValue, button) {
+      const originalTitle = button.title;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(textValue);
+        } else {
+          const area = document.createElement("textarea");
+          area.value = textValue;
+          area.setAttribute("readonly", "");
+          area.style.position = "fixed";
+          area.style.left = "-9999px";
+          document.body.append(area);
+          area.select();
+          document.execCommand("copy");
+          area.remove();
+        }
+        button.title = "Copied";
+      } catch (_error) {
+        button.title = "Copy failed";
+      }
+      setTimeout(() => { button.title = originalTitle; }, 1200);
+    }
+    function copyIcon() {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("aria-hidden", "true");
+      const rectBack = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rectBack.setAttribute("x", "8");
+      rectBack.setAttribute("y", "8");
+      rectBack.setAttribute("width", "12");
+      rectBack.setAttribute("height", "12");
+      rectBack.setAttribute("rx", "2");
+      const pathFront = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      pathFront.setAttribute("d", "M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2");
+      svg.append(rectBack, pathFront);
+      return svg;
+    }
+    function jsonBlock(value, readoutKey = "") {
+      const details = el("details", "raw");
+      if (readoutKey) details.open = openRawReadouts.has(readoutKey);
+      details.addEventListener("toggle", () => {
+        if (!readoutKey || renderingDashboard) return;
+        if (details.open) openRawReadouts.add(readoutKey);
+        else openRawReadouts.delete(readoutKey);
+      });
+      const textValue = JSON.stringify(value, null, 2);
+      const summary = el("summary", "");
+      const summaryContent = el("span", "raw-summary");
+      summaryContent.append(el("span", "", "Full readout"));
+      const copy = el("button", "copy-button");
+      copy.type = "button";
+      copy.title = "Copy full readout";
+      copy.setAttribute("aria-label", "Copy full readout");
+      copy.append(copyIcon());
+      copy.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        copyTextToClipboard(textValue, copy);
+      });
+      summaryContent.append(copy);
+      summary.append(summaryContent);
+      details.append(summary);
+      const block = el("pre", "");
+      block.textContent = textValue;
+      details.append(block);
+      return details;
+    }
+    function pill(text, kind) {
+      return el("span", `pill ${kind || "neutral"}`, text);
+    }
+    function kv(label, value) {
+      const node = el("div", "kv");
+      node.append(el("span", "", label));
+      node.append(el("strong", "", value === undefined || value === null || value === "" ? "-" : String(value)));
+      return node;
+    }
+    function statusPill(online, detail) {
+      if (online) return pill(detail || "online", "ok");
+      if (detail) return pill(detail, "warn");
+      return pill("offline", "bad");
+    }
+    function capabilityChips(capabilities) {
+      const wrap = el("div", "chips");
+      if (!Array.isArray(capabilities) || !capabilities.length) return wrap;
+      for (const capability of capabilities) wrap.append(el("span", "chip", capability));
+      return wrap;
+    }
+    function formatUptime(seconds) {
+      const value = Number(seconds || 0);
+      const days = Math.floor(value / 86400);
+      const hours = Math.floor((value % 86400) / 3600);
+      const minutes = Math.floor((value % 3600) / 60);
+      if (days) return `${days}d ${hours}h`;
+      if (hours) return `${hours}h ${minutes}m`;
+      return `${minutes}m`;
+    }
+    function setActiveTab(tabName) {
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === tabName);
+      });
+      document.querySelectorAll(".tab-panel").forEach((panel) => {
+        panel.classList.toggle("active", panel.dataset.tabPanel === tabName);
+      });
+      localStorage.setItem(tabKey, tabName);
+    }
+    function initTabs() {
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+      });
+      const saved = localStorage.getItem(tabKey) || "events";
+      setActiveTab(document.querySelector(`[data-tab="${saved}"]`) ? saved : "events");
+    }
+    function authHeaders() {
+      const saved = localStorage.getItem(tokenKey) || "";
+      return saved ? {Authorization: `Bearer ${saved}`} : {};
+    }
+    function todayText() {
+      const now = new Date();
+      const month = String(now.getMonth() + 1).padStart(2, "0");
+      const day = String(now.getDate()).padStart(2, "0");
+      return `${now.getFullYear()}-${month}-${day}`;
+    }
+    function dateKey(date) {
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${date.getFullYear()}-${month}-${day}`;
+    }
+    function parseDateKey(value) {
+      const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!match) return null;
+      return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    }
+    function monthTitle(date) {
+      return date.toLocaleDateString(undefined, {month: "long", year: "numeric"});
+    }
+    function setAuthenticated(authenticated) {
+      auth.hidden = authenticated;
+      logoutButton.hidden = !authenticated;
+    }
+    function clearDashboard() {
+      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks", "persistentMissionTasks", "missionCalendar", "pairedDevices"]) {
+        clear(document.getElementById(id));
+      }
+      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "activeMissionCount", "persistentMissionCount", "missionFormResult", "pairedDeviceCount", "pairingFormResult"]) {
+        document.getElementById(id).textContent = "";
+      }
+    }
+    document.getElementById("tokenAuth").addEventListener("submit", (event) => {
+      event.preventDefault();
+      localStorage.setItem(tokenKey, token.value);
+      token.value = "";
+      load();
+    });
+    document.getElementById("requestCodeButton").addEventListener("click", async () => {
+      authMessage.textContent = "Sending code...";
+      const response = await fetch("/dashboard-auth/request", {method: "POST", cache: "no-store"});
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        authMessage.textContent = payload.error || `Failed to send code: HTTP ${response.status}`;
+        return;
+      }
+      if (payload.sent === false) {
+        authMessage.textContent = `Code was requested recently. Try again in ${payload.retry_after_seconds || 60}s.`;
+        return;
+      }
+      authMessage.textContent = `Code sent. It expires in ${payload.expires_in_seconds || 300}s.`;
+      code.focus();
+    });
+    document.getElementById("verifyCodeButton").addEventListener("click", async () => {
+      authMessage.textContent = "Verifying code...";
+      const response = await fetch("/dashboard-auth/verify", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({code: code.value}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        authMessage.textContent = payload.error || `Failed to verify code: HTTP ${response.status}`;
+        return;
+      }
+      localStorage.setItem(tokenKey, payload.session_token);
+      code.value = "";
+      authMessage.textContent = "Access granted.";
+      load();
+    });
+    logoutButton.addEventListener("click", () => {
+      localStorage.removeItem(tokenKey);
+      clearDashboard();
+      statusEl.textContent = "Logged out.";
+      authMessage.textContent = "Request a temporary code on your phone.";
+      setAuthenticated(false);
+    });
+    function openMissionFormModal() {
+      document.getElementById("missionFormResult").textContent = "";
+      if (!document.getElementById("missionDueDate").value) {
+        document.getElementById("missionDueDate").value = latestMissionToday || todayText();
+      }
+      document.getElementById("missionModal").classList.add("open");
+      document.getElementById("missionTitle").focus();
+    }
+    function closeMissionFormModal() {
+      document.getElementById("missionModal").classList.remove("open");
+      document.getElementById("missionFormResult").textContent = "";
+    }
+    async function createMissionTask(event) {
+      event.preventDefault();
+      const result = document.getElementById("missionFormResult");
+      const taskType = document.getElementById("missionType").value;
+      const payload = {
+        title: document.getElementById("missionTitle").value,
+        notes: document.getElementById("missionNotes").value,
+        task_type: taskType,
+        due_date: taskType === "daily" ? (document.getElementById("missionDueDate").value || todayText()) : "",
+      };
+      result.textContent = "Queuing...";
+      const response = await fetch("/mission-board/tasks", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json", ...authHeaders()},
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) {
+        result.textContent = data.error || `Failed: HTTP ${response.status}`;
+        return;
+      }
+      document.getElementById("missionTitle").value = "";
+      document.getElementById("missionNotes").value = "";
+      document.getElementById("missionDueDate").value = latestMissionToday || todayText();
+      document.getElementById("missionType").value = "persistent";
+      result.textContent = "Queued for home sync.";
+      closeMissionFormModal();
+      load();
+    }
+    async function completeMissionTask(taskId, button) {
+      button.disabled = true;
+      button.textContent = "Queuing...";
+      const response = await fetch(`/mission-board/tasks/${encodeURIComponent(taskId)}/complete`, {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json", ...authHeaders()},
+        body: JSON.stringify({completed_by: "relay-dashboard"}),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) {
+        button.disabled = false;
+        button.textContent = data.error || "Failed";
+        return;
+      }
+      button.textContent = "Queued";
+      load();
+    }
+    function csvList(value) {
+      return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+    }
+    async function openPairingFormPanel() {
+      const panel = document.getElementById("pairingFormPanel");
+      const result = document.getElementById("pairingFormResult");
+      panel.hidden = false;
+      result.textContent = "Reading external IP...";
+      try {
+        const response = await fetch("/dashboard-client-info", {cache: "no-store", headers: authHeaders()});
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.external_ip) {
+          document.getElementById("pairingExternalIp").value = data.external_ip;
+          result.textContent = "External IP filled.";
+        } else {
+          result.textContent = "External IP unavailable.";
+        }
+      } catch (error) {
+        result.textContent = "External IP unavailable.";
+      }
+      document.getElementById("pairingDeviceId").focus();
+    }
+    function closePairingFormPanel() {
+      document.getElementById("pairingFormPanel").hidden = true;
+      document.getElementById("pairingFormResult").textContent = "";
+    }
+    async function registerPairedDevice(event) {
+      event.preventDefault();
+      const result = document.getElementById("pairingFormResult");
+      const payload = {
+        device_id: document.getElementById("pairingDeviceId").value,
+        name: document.getElementById("pairingName").value,
+        type: document.getElementById("pairingType").value,
+        hostname: document.getElementById("pairingHostname").value,
+        local_ips: csvList(document.getElementById("pairingLocalIps").value),
+        external_ip: document.getElementById("pairingExternalIp").value,
+        ports: csvList(document.getElementById("pairingPorts").value),
+        notes: document.getElementById("pairingNotes").value,
+      };
+      if (!payload.device_id.trim()) {
+        result.textContent = "Device ID is required.";
+        return;
+      }
+      result.textContent = "Saving...";
+      const response = await fetch("/dashboard/paired-devices", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json", ...authHeaders()},
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) {
+        result.textContent = data.error || `Failed: HTTP ${response.status}`;
+        return;
+      }
+      result.textContent = "Saved.";
+      document.getElementById("pairingForm").reset();
+      closePairingFormPanel();
+      load();
+    }
+    function missionTaskRow(task, today, compact = false) {
+        const row = el("div", "row");
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", task.title || "Untitled task"));
+        const detail = task.task_type === "daily" ? `today only · ${task.due_date || today || ""}` : "persistent";
+        title.append(el("div", "muted meta-line", detail));
+        head.append(title);
+        const done = el("button", "", "Complete");
+        done.type = "button";
+        done.addEventListener("click", () => completeMissionTask(task.id, done));
+        head.append(done);
+        row.append(head);
+        if (task.notes) row.append(el("div", "muted meta-line", task.notes));
+        if (!compact) {
+          const meta = el("div", "device-meta");
+          meta.append(kv("ID", task.id));
+          meta.append(kv("Created", timeText(task.created_at)));
+          meta.append(kv("Source", task.source));
+          row.append(meta);
+        }
+        return row;
+    }
+    function renderMissionCalendar(tasks, today) {
+      const root = document.getElementById("missionCalendar");
+      clear(root);
+      const calendarTitle = document.getElementById("missionCalendarTitle");
+      calendarTitle.textContent = monthTitle(missionCalendarDate);
+      const year = missionCalendarDate.getFullYear();
+      const month = missionCalendarDate.getMonth();
+      const first = new Date(year, month, 1);
+      const start = new Date(first);
+      start.setDate(first.getDate() - ((first.getDay() + 6) % 7));
+      const byDate = new Map();
+      for (const task of tasks) {
+        if (task.task_type !== "daily") continue;
+        const key = task.due_date || today;
+        if (!byDate.has(key)) byDate.set(key, []);
+        byDate.get(key).push(task);
+      }
+      for (let index = 0; index < 42; index += 1) {
+        const date = new Date(start);
+        date.setDate(start.getDate() + index);
+        const key = dateKey(date);
+        const day = el("div", `calendar-day${date.getMonth() === month ? "" : " outside"}${key === today ? " today" : ""}`);
+        day.append(el("div", "calendar-date", String(date.getDate())));
+        const dayTasks = byDate.get(key) || [];
+        for (const task of dayTasks.slice(0, 3)) {
+          const item = el("button", "calendar-task", task.title || "Untitled task");
+          item.type = "button";
+          item.title = task.notes ? `${task.title || "Untitled task"} - ${task.notes}` : (task.title || "Untitled task");
+          item.addEventListener("click", () => setActiveTab("mission"));
+          day.append(item);
+        }
+        if (dayTasks.length > 3) day.append(el("div", "calendar-more", `+${dayTasks.length - 3} more`));
+        root.append(day);
+      }
+    }
+    function renderMissionBoard(homePayload) {
+      const root = document.getElementById("missionTasks");
+      const persistentRoot = document.getElementById("persistentMissionTasks");
+      clear(root);
+      clear(persistentRoot);
+      const board = homePayload.mission_board || {};
+      const tasks = Array.isArray(board.tasks) ? board.tasks : [];
+      const today = board.today || todayText();
+      latestMissionToday = today;
+      document.getElementById("missionCount").textContent = `${tasks.length} open`;
+      document.getElementById("activeMissionCount").textContent = `${tasks.length} shown`;
+      const todayDate = parseDateKey(today);
+      if (todayDate && !missionCalendarDate) {
+        missionCalendarDate = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
+      }
+      renderMissionCalendar(tasks, today);
+
+      const persistent = tasks.filter((task) => task.task_type !== "daily");
+      document.getElementById("persistentMissionCount").textContent = `${persistent.length} open`;
+      if (!persistent.length) {
+        persistentRoot.append(el("div", "row muted", "No persistent tasks."));
+      } else {
+        for (const task of persistent) persistentRoot.append(missionTaskRow(task, today, true));
+      }
+
+      if (!tasks.length) {
+        root.append(el("div", "row muted", "No open mission tasks."));
+        return;
+      }
+      for (const task of tasks) root.append(missionTaskRow(task, today));
+    }
+    function renderPairedDevices(devices) {
+      const root = document.getElementById("pairedDevices");
+      clear(root);
+      const paired = Array.isArray(devices) ? devices : [];
+      document.getElementById("pairedDeviceCount").textContent = `${paired.length} paired`;
+      if (!paired.length) {
+        root.append(el("div", "row muted", "No paired IP devices."));
+        return;
+      }
+      for (const device of paired) {
+        const row = el("div", "row");
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", device.name || device.id));
+        title.append(el("div", "muted meta-line", `${device.type || "computer"}${device.hostname ? ` · ${device.hostname}` : ""}`));
+        head.append(title);
+        head.append(pill("paired", "neutral"));
+        row.append(head);
+        const meta = el("div", "device-meta");
+        meta.append(kv("External IP", device.external_ip || device.remote_addr));
+        meta.append(kv("Local IPs", Array.isArray(device.local_ips) ? device.local_ips.join(", ") : ""));
+        meta.append(kv("Ports", Array.isArray(device.ports) ? device.ports.join(", ") : ""));
+        meta.append(kv("Last update", timeText(device.last_seen)));
+        meta.append(kv("First seen", timeText(device.first_seen)));
+        meta.append(kv("Remote address", device.remote_addr));
+        row.append(meta);
+        if (device.notes) row.append(el("div", "muted meta-line", device.notes));
+        row.append(jsonBlock(device.payload || {}, `paired:${device.id || device.name || ""}`));
+        root.append(row);
+      }
+    }
+    function render(data) {
+      renderingDashboard = true;
+      setAuthenticated(true);
+      statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      const summary = document.getElementById("summary");
+      clear(summary);
+      for (const [label, value] of [
+        ["Remote devices", data.relay.device_count],
+        ["Paired IP devices", (data.paired_devices || []).length],
+        ["Pending events", data.relay.pending_event_count],
+        ["Acked events", data.relay.acked_event_count],
+        ["Relay uptime", formatUptime(data.relay.uptime_seconds)],
+      ]) {
+        const stat = el("div", "stat");
+        stat.append(el("span", "muted", label));
+        stat.append(el("strong", "", String(value)));
+        summary.append(stat);
+      }
+
+      renderPairedDevices(data.paired_devices);
+
+      const devices = document.getElementById("devices");
+      clear(devices);
+      document.getElementById("remoteDeviceCount").textContent = `${data.devices.length} registered`;
+      if (!data.devices.length) devices.append(el("div", "row muted", "No remote devices registered."));
+      for (const device of data.devices) {
+        const row = el("div", "row");
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", device.id));
+        title.append(el("div", "muted meta-line", `${device.type || "unknown"} ${device.model || ""}`.trim()));
+        head.append(title);
+        head.append(pill("remote", "neutral"));
+        row.append(head);
+        const meta = el("div", "device-meta");
+        meta.append(kv("Last seen", timeText(device.last_seen)));
+        meta.append(kv("First seen", timeText(device.first_seen)));
+        meta.append(kv("Remote address", device.remote_addr));
+        row.append(meta);
+        devices.append(row);
+      }
+
+      const events = document.getElementById("events");
+      clear(events);
+      document.getElementById("relayEventCount").textContent = `${data.recent_events.length} shown`;
+      if (!data.recent_events.length) events.append(el("div", "row muted", "No relay events recorded."));
+      for (const event of data.recent_events.slice().reverse()) {
+        const row = el("div", "row");
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", `${event.event_type} from ${event.device_id}`));
+        title.append(el("div", "muted meta-line", timeText(event.received_at)));
+        head.append(title);
+        head.append(pill(event.acked_at ? "acked" : "pending", event.acked_at ? "ok" : "warn"));
+        row.append(head);
+        const meta = el("div", "device-meta");
+        meta.append(kv("Attempts", event.attempts));
+        meta.append(kv("Delivered", timeText(event.delivered_at)));
+        meta.append(kv("Acked", timeText(event.acked_at)));
+        row.append(meta);
+        row.append(jsonBlock(event.payload || {}, `event:${event.id || `${event.device_id}:${event.received_at}`}`));
+        events.append(row);
+      }
+
+      const home = document.getElementById("home");
+      clear(home);
+      if (!data.home) {
+        document.getElementById("homeSnapshotAge").textContent = "";
+        home.append(el("div", "row muted", "No home server snapshot received."));
+      } else {
+        const payload = data.home.payload || {};
+        const row = el("div", "row");
+        document.getElementById("homeSnapshotAge").textContent = `received ${timeText(data.home.received_at)}`;
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", "Latest home sync"));
+        title.append(el("div", "muted meta-line", `Snapshot ${timeText(data.home.received_at)}`));
+        head.append(title);
+        head.append(pill("synced", "ok"));
+        row.append(head);
+        const summary = payload.summary || {};
+        const meta = el("div", "device-meta");
+        meta.append(kv("Devices", summary.device_count ?? "?"));
+        meta.append(kv("Online", summary.online_count ?? "?"));
+        meta.append(kv("Offline", summary.offline_count ?? "?"));
+        meta.append(kv("Recent buttons", summary.recent_button_event_count ?? "?"));
+        meta.append(kv("Rules", summary.rule_count ?? "?"));
+        meta.append(kv("Active timers", summary.active_timer_count ?? "?"));
+        row.append(meta);
+        home.append(row);
+      }
+
+      const homeDevices = document.getElementById("homeDevices");
+      renderingHomeDevices = true;
+      clear(homeDevices);
+      const homePayload = data.home?.payload || {};
+      renderMissionBoard(homePayload);
+      const devicesFromHome = Array.isArray(homePayload.devices) ? homePayload.devices : [];
+      document.getElementById("homeDeviceCount").textContent = `${devicesFromHome.length} in snapshot`;
+      if (!devicesFromHome.length) {
+        homeDevices.append(el("div", "row muted", "No home devices in the latest snapshot."));
+      }
+      for (const device of devicesFromHome) {
+        const row = el("details", "row");
+        const deviceKey = String(device.id || device.display_name || "");
+        row.open = openHomeDevices.has(deviceKey);
+        row.addEventListener("toggle", () => {
+          if (!deviceKey || renderingHomeDevices) return;
+          if (row.open) openHomeDevices.add(deviceKey);
+          else openHomeDevices.delete(deviceKey);
+        });
+        const summaryNode = el("summary", "");
+        summaryNode.className = "row-head";
+        const title = el("div", "row-title");
+        const name = device.display_name || device.friendly_name || device.id || "unknown device";
+        title.append(el("strong", "", name));
+        title.append(el("div", "muted meta-line", `${device.type || "unknown"}${device.model ? ` · ${device.model}` : ""}`));
+        summaryNode.append(title);
+        summaryNode.append(statusPill(device.online, device.online_detail));
+        row.append(summaryNode);
+        const meta = el("div", "device-meta");
+        for (const [label, value] of [
+          ["ID", device.id],
+          ["Type", device.type],
+          ["Model", device.model],
+          ["Firmware", device.firmware_version || device.firmware?.version],
+          ["Seen via", device.last_seen_via],
+          ["Last seen", timeText(device.last_seen)],
+          ["Last local", timeText(device.last_local_seen)],
+          ["Last relay", timeText(device.last_relay_seen)],
+          ["Pending events", device.pending_events],
+          ["Capabilities", Array.isArray(device.capabilities) ? device.capabilities.join(", ") : ""],
+        ]) {
+          if (value !== undefined && value !== null && value !== "") {
+            meta.append(kv(label, value));
+          }
+        }
+        row.append(meta);
+        row.append(capabilityChips(device.capabilities));
+        row.append(jsonBlock(device, `home-device:${deviceKey}`));
+        homeDevices.append(row);
+      }
+      setTimeout(() => { renderingHomeDevices = false; }, 0);
+
+      const uptimeMonitors = document.getElementById("uptimeMonitors");
+      clear(uptimeMonitors);
+      const monitors = Array.isArray(homePayload.uptime_monitors) ? homePayload.uptime_monitors : [];
+      const onlineChecks = monitors.filter((monitor) => monitor.online).length;
+      document.getElementById("uptimeCount").textContent = `${onlineChecks}/${monitors.length} online`;
+      if (!monitors.length) {
+        uptimeMonitors.append(el("div", "row muted", "No uptime checks in the latest home snapshot."));
+      }
+      for (const monitor of monitors) {
+        const row = el("div", "row");
+        const head = el("div", "row-head");
+        const title = el("div", "row-title");
+        title.append(el("strong", "", monitor.name || monitor.id || "uptime check"));
+        title.append(el("div", "muted meta-line", monitor.target || ""));
+        head.append(title);
+        head.append(statusPill(monitor.online, monitor.detail));
+        row.append(head);
+        const meta = el("div", "device-meta");
+        meta.append(kv("ID", monitor.id));
+        meta.append(kv("Last checked", timeText(monitor.last_checked_at)));
+        meta.append(kv("Next check", timeText(monitor.next_check_at)));
+        meta.append(kv("Interval", `${monitor.interval_seconds || 0}s`));
+        meta.append(kv("Latency", monitor.latency_ms === null || monitor.latency_ms === undefined ? "" : `${monitor.latency_ms}ms`));
+        meta.append(kv("Status code", monitor.status_code));
+        meta.append(kv("Enabled", monitor.enabled === false ? "no" : "yes"));
+        row.append(meta);
+        row.append(jsonBlock(monitor, `uptime:${monitor.id || monitor.target || ""}`));
+        uptimeMonitors.append(row);
+      }
+      setTimeout(() => { renderingDashboard = false; }, 0);
+    }
+    async function load() {
+      const response = await fetch("/dashboard-data", {cache: "no-store", headers: authHeaders()});
+      if (response.status === 401) {
+        statusEl.textContent = "Dashboard token required.";
+        clearDashboard();
+        setAuthenticated(false);
+        return;
+      }
+      if (!response.ok) {
+        statusEl.textContent = `Failed to load dashboard: HTTP ${response.status}`;
+        return;
+      }
+      render(await response.json());
+    }
+    document.getElementById("missionForm").addEventListener("submit", createMissionTask);
+    document.getElementById("openMissionForm").addEventListener("click", openMissionFormModal);
+    document.getElementById("closeMissionForm").addEventListener("click", closeMissionFormModal);
+    document.getElementById("cancelMissionForm").addEventListener("click", closeMissionFormModal);
+    document.getElementById("missionModal").addEventListener("click", (event) => {
+      if (event.target.id === "missionModal") closeMissionFormModal();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && document.getElementById("missionModal").classList.contains("open")) {
+        closeMissionFormModal();
+      }
+    });
+    document.getElementById("missionCalendarPrev").addEventListener("click", () => {
+      missionCalendarDate = new Date(missionCalendarDate.getFullYear(), missionCalendarDate.getMonth() - 1, 1);
+      load();
+    });
+    document.getElementById("missionCalendarToday").addEventListener("click", () => {
+      const today = parseDateKey(todayText()) || new Date();
+      missionCalendarDate = new Date(today.getFullYear(), today.getMonth(), 1);
+      load();
+    });
+    document.getElementById("missionCalendarNext").addEventListener("click", () => {
+      missionCalendarDate = new Date(missionCalendarDate.getFullYear(), missionCalendarDate.getMonth() + 1, 1);
+      load();
+    });
+    document.getElementById("openPairingForm").addEventListener("click", openPairingFormPanel);
+    document.getElementById("closePairingForm").addEventListener("click", closePairingFormPanel);
+    document.getElementById("pairingForm").addEventListener("submit", registerPairedDevice);
+    document.getElementById("missionDueDate").value = todayText();
+    initTabs();
+    load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>
