@@ -35,20 +35,21 @@ run_git fetch --prune origin
 run_git checkout "$REF"
 run_git pull --ff-only origin "$REF"
 
-install -m 0644 "$REPO_DIR/relay/server.py" "$APP_DIR/server.py"
-install -m 0644 "$REPO_DIR/relay/.env.example" "$APP_DIR/.env.example"
-install -m 0755 "$REPO_DIR/relay/install-relay-service.sh" "$APP_DIR/install-relay-service.sh"
+# Replace managed application directories so removed modules/assets do not linger.
+rm -rf "$APP_DIR/relay_app" "$APP_DIR/static"
 
-# Application package (replace wholesale so removed modules do not linger).
-rm -rf "$APP_DIR/relay_app"
-install -d -m 0750 "$APP_DIR/relay_app"
-install -m 0644 "$REPO_DIR/relay/relay_app"/*.py "$APP_DIR/relay_app/"
+run_git ls-files -z relay | while IFS= read -r -d '' source_path; do
+  relative_path="${source_path#relay/}"
+  source_file="$REPO_DIR/$source_path"
+  target_file="$APP_DIR/$relative_path"
+  mode="0644"
+  if [[ -x "$source_file" ]]; then
+    mode="0755"
+  fi
+  install -D -m "$mode" "$source_file" "$target_file"
+done
 
-# Static dashboard assets.
-install -d -m 0750 "$APP_DIR/static"
-install -m 0644 "$REPO_DIR/relay/static"/* "$APP_DIR/static/"
-
-python3 -m py_compile "$APP_DIR/server.py" "$APP_DIR/relay_app"/*.py
+find "$APP_DIR" -name '*.py' -print0 | xargs -0 python3 -m py_compile
 
 chown -R relay:relay "$APP_DIR"
 chmod 750 "$APP_DIR"

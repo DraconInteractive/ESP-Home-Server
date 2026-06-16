@@ -15,7 +15,7 @@ fi
 
 if [[ ! -f "$APP_DIR/server.py" ]]; then
   echo "$APP_DIR/server.py was not found."
-  echo "Deploy relay/server.py to $APP_DIR before installing the service."
+  echo "Deploy the relay app files to $APP_DIR before installing the service."
   exit 1
 fi
 
