@@ -558,6 +558,7 @@
     <section class="grid" id="summary"></section>
     <nav class="tabs" aria-label="Relay dashboard sections">
       <button class="tab-button active" type="button" data-tab="events">Events</button>
+      <button class="tab-button" type="button" data-tab="note">r1-note</button>
       <button class="tab-button" type="button" data-tab="mission">Mission</button>
       <button class="tab-button" type="button" data-tab="pairing">Pairing</button>
       <button class="tab-button" type="button" data-tab="devices">Devices</button>
@@ -566,6 +567,10 @@
     <section class="tab-panel active" data-tab-panel="events">
       <div class="section-title"><h2>Recent Relay Events</h2><span class="muted" id="relayEventCount"></span></div>
       <section class="rows" id="events"></section>
+    </section>
+    <section class="tab-panel" data-tab-panel="note">
+      <div class="section-title"><h2>r1-note</h2><span class="muted" id="r1NoteMeta"></span></div>
+      <section class="rows" id="r1Note"></section>
     </section>
     <section class="tab-panel" data-tab-panel="mission">
       <div class="section-title">
@@ -834,10 +839,10 @@
       logoutButton.hidden = !authenticated;
     }
     function clearDashboard() {
-      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks", "persistentMissionTasks", "missionCalendar", "pairedDevices"]) {
+      for (const id of ["summary", "devices", "events", "home", "homeDevices", "uptimeMonitors", "missionTasks", "persistentMissionTasks", "missionCalendar", "pairedDevices", "r1Note"]) {
         clear(document.getElementById(id));
       }
-      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "activeMissionCount", "persistentMissionCount", "missionFormResult", "pairedDeviceCount", "pairingFormResult"]) {
+      for (const id of ["remoteDeviceCount", "relayEventCount", "homeSnapshotAge", "homeDeviceCount", "uptimeCount", "missionCount", "activeMissionCount", "persistentMissionCount", "missionFormResult", "pairedDeviceCount", "pairingFormResult", "r1NoteMeta"]) {
         document.getElementById(id).textContent = "";
       }
     }
@@ -1127,6 +1132,25 @@
         root.append(row);
       }
     }
+    function renderR1Note(note) {
+      const root = document.getElementById("r1Note");
+      const meta = document.getElementById("r1NoteMeta");
+      clear(root);
+      const current = note || {};
+      meta.textContent = current.updated_at ? `updated ${timeText(current.updated_at)}` : "not set";
+      const row = el("div", "row");
+      const head = el("div", "row-head");
+      const title = el("div", "row-title");
+      title.append(el("strong", "", "r1-note"));
+      title.append(el("div", "muted meta-line", current.received_at ? `provisioned ${timeText(current.received_at)}` : "read-only relay copy"));
+      head.append(title);
+      head.append(pill("read only", "neutral"));
+      row.append(head);
+      const block = el("pre", "");
+      block.textContent = current.text || "";
+      row.append(block);
+      root.append(row);
+    }
     function render(data) {
       renderingDashboard = true;
       setAuthenticated(true);
@@ -1147,6 +1171,7 @@
       }
 
       renderPairedDevices(data.paired_devices);
+      renderR1Note(data.r1_note);
 
       const devices = document.getElementById("devices");
       clear(devices);

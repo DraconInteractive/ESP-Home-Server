@@ -102,6 +102,7 @@ Dashboard:
 ```text
 GET /dashboard
 GET /dashboard-data
+GET /r1-note
 POST /mission-board/tasks
 POST /mission-board/tasks/{task_id}/complete
 ```
@@ -132,6 +133,10 @@ token remains valid as a fallback.
 Mission-board posts require dashboard access. They enqueue events for the home
 server; the home server remains the canonical owner of task state and publishes
 the active board back in the dashboard snapshot.
+
+`GET /r1-note` returns the latest relay copy of the `r1-note` text block. The
+relay dashboard shows it read-only; dashboard/API clients cannot set the note
+through the relay.
 
 IP pairing lets trusted full computers or servers publish their current
 connection details to the relay for authenticated dashboard lookup:
@@ -173,10 +178,15 @@ Home server sync:
 
 ```text
 POST /sync/dashboard-snapshot
+GET  /sync/r1-note
+POST /sync/r1-note
 GET  /sync/device-statuses
 GET  /sync/events
 POST /sync/events/{event_id}/ack
 ```
+
+`POST /sync/r1-note` is the only relay route that provisions the relay copy of
+the note, and it requires `RELAY_SYNC_TOKEN`.
 
 Sync endpoints require:
 

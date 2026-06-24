@@ -63,6 +63,22 @@ class RelayHandler(BaseHTTPRequestHandler):
             json_response(self, 200, {"ok": True, "external_ip": client_ip(self)})
             return
 
+        if path == "/r1-note":
+            if not self._require(require_dashboard_access(self)):
+                return
+            with config.STATE_LOCK:
+                note = store.latest_r1_note()
+            json_response(self, 200, {"ok": True, "r1_note": note})
+            return
+
+        if path == "/sync/r1-note":
+            if not self._require(require_static_token(self, config.SYNC_TOKEN, "sync")):
+                return
+            with config.STATE_LOCK:
+                note = store.latest_r1_note()
+            json_response(self, 200, {"ok": True, "r1_note": note})
+            return
+
         if path == "/sync/events":
             if not self._require(require_static_token(self, config.SYNC_TOKEN, "sync")):
                 return
@@ -227,7 +243,21 @@ class RelayHandler(BaseHTTPRequestHandler):
                 payload = read_json_body(self)
                 with config.STATE_LOCK:
                     store.store_dashboard_snapshot(payload)
+                    if isinstance(payload.get("r1_note"), dict):
+                        store.store_r1_note(payload["r1_note"])
                 json_response(self, 200, {"ok": True})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/sync/r1-note":
+            if not self._require(require_static_token(self, config.SYNC_TOKEN, "sync")):
+                return
+            try:
+                payload = read_json_body(self)
+                with config.STATE_LOCK:
+                    note = store.store_r1_note(payload)
+                json_response(self, 200, {"ok": True, "r1_note": note})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return

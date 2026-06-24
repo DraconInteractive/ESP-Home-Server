@@ -350,6 +350,48 @@ def ack_event(event_id: str, payload: dict[str, Any]) -> bool:
 
 # --- Dashboard snapshot -----------------------------------------------------
 
+def clean_note_text(value: str) -> str:
+    return str(value).replace("\r\n", "\n").replace("\r", "\n")[:10000]
+
+
+def public_r1_note(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    note = payload if isinstance(payload, dict) else {}
+    return {
+        "label": "r1-note",
+        "text": clean_note_text(str(note.get("text", ""))),
+        "updated_at": int(note.get("updated_at", 0) or 0),
+    }
+
+
+def store_r1_note(payload: dict[str, Any]) -> dict[str, Any]:
+    now = int(time.time())
+    note = public_r1_note(payload)
+    if not note["updated_at"]:
+        note["updated_at"] = now
+    with db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO r1_notes (id, received_at, note_json)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                received_at = excluded.received_at,
+                note_json = excluded.note_json
+            """,
+            (now, json.dumps(note, separators=(",", ":"))),
+        )
+    return note
+
+
+def latest_r1_note() -> dict[str, Any]:
+    with db_connect() as connection:
+        row = connection.execute("SELECT * FROM r1_notes WHERE id = 1").fetchone()
+    if not row:
+        return public_r1_note()
+    note = public_r1_note(json_obj(row["note_json"]))
+    note["received_at"] = row["received_at"]
+    return note
+
+
 def store_dashboard_snapshot(payload: dict[str, Any]) -> None:
     now = int(time.time())
     with db_connect() as connection:
@@ -391,6 +433,7 @@ def relay_snapshot() -> dict[str, Any]:
     paired = [paired_device_from_row(row) for row in paired_rows]
     recent = [row_event(row) for row in reversed(recent_rows)]
     home = latest_dashboard_snapshot()
+    note = latest_r1_note()
     return {
         "relay": {
             "host": config.HOST,
@@ -409,4 +452,5 @@ def relay_snapshot() -> dict[str, Any]:
         "paired_devices": paired,
         "recent_events": recent,
         "home": home,
+        "r1_note": note,
     }

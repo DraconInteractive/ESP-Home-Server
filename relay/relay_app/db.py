@@ -72,6 +72,13 @@ def init_database() -> None:
             )
         """)
         connection.execute("""
+            CREATE TABLE IF NOT EXISTS r1_notes (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                received_at INTEGER NOT NULL,
+                note_json TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        connection.execute("""
             CREATE TABLE IF NOT EXISTS paired_devices (
                 device_id TEXT PRIMARY KEY,
                 first_seen INTEGER NOT NULL,
