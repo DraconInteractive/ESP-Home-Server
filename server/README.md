@@ -50,6 +50,7 @@ Runtime state is stored locally:
 - `server-state.sqlite3` for recent command and button event history
 - `firmware-catalog.json` and `firmware-catalog/` for OTA catalog metadata and
   uploaded firmware binaries
+- `r1-note.json` for the `r1-note` text block
 
 Firmware versions use a semantic base plus channel suffix: `d` for development,
 `s` for staging, and `p` for production. Example: `0.0.1d`.
@@ -98,6 +99,7 @@ export COMMAND_SERVER_RELAY_SNAPSHOT_SECONDS="30"
 When enabled, the local server:
 
 - pushes a reduced read-only dashboard snapshot to `/sync/dashboard-snapshot`
+- provisions the current `r1-note` text block to `/sync/r1-note`
 - polls `/sync/events` for pending remote device events
 - converts remote `register` events into local device registrations
 - converts remote `button` events into the existing local event-rule flow
@@ -105,7 +107,9 @@ When enabled, the local server:
 - acks each relay event after processing
 
 The pushed dashboard snapshot deliberately omits local action controls, command
-simulation, firmware upload paths, and media proxy endpoints.
+simulation, firmware upload paths, and media proxy endpoints. It includes the
+host diagnostics under `server.system`, with IP/address fields stripped before
+sync.
 
 ## Endpoints
 
@@ -114,11 +118,21 @@ simulation, firmware upload paths, and media proxy endpoints.
   device media endpoints.
 - `GET /dashboard-data` returns the dashboard snapshot used by the UI.
   The dashboard includes startup diagnostics, active timers, and packaged
-  action test controls.
+  action test controls. The overview also shows host CPU, RAM, storage, and
+  best-effort GPU telemetry when the platform exposes it.
 - `GET /mission-board` returns active mission-board tasks. Persistent tasks stay
   active until completed; daily tasks are active only on their local `due_date`.
 - `POST /mission-board/tasks` creates a mission-board task.
 - `POST /mission-board/tasks/{task_id}/complete` completes a mission-board task.
+- `GET /r1-note` returns the stored `r1-note` text block.
+- `POST /r1-note` or `PUT /r1-note` sets the note. Example:
+
+```sh
+curl -X PUT http://127.0.0.1:8080/r1-note \
+  -H 'Content-Type: application/json' \
+  --data '{"text":"Remember to check the relay."}'
+```
+
 - `GET /health` returns a basic health check.
 - `GET /actions` returns the configured packaged server actions.
 - `POST /actions/{action_name}/run` runs a configured action. If an action is

@@ -12,6 +12,8 @@ import io
 import json
 import hashlib
 import os
+import glob
+import platform
 import re
 import shlex
 import shutil
@@ -82,6 +84,10 @@ MISSION_BOARD_PATH = os.environ.get(
     "COMMAND_SERVER_MISSION_BOARD_PATH",
     os.path.join(os.path.dirname(__file__), "mission-board.json"),
 )
+R1_NOTE_PATH = os.environ.get(
+    "COMMAND_SERVER_R1_NOTE_PATH",
+    os.path.join(os.path.dirname(__file__), "r1-note.json"),
+)
 DATABASE_PATH = os.environ.get(
     "COMMAND_SERVER_DATABASE_PATH",
     os.path.join(os.path.dirname(__file__), "server-state.sqlite3"),
@@ -117,6 +123,7 @@ RECENT_RULE_RUNS: list[dict[str, Any]] = []
 ACTIVE_TIMERS: dict[str, dict[str, Any]] = {}
 UPTIME_MONITORS: dict[str, dict[str, Any]] = {}
 MISSION_TASKS: dict[str, dict[str, Any]] = {}
+R1_NOTE: dict[str, Any] = {"label": "r1-note", "text": "", "updated_at": 0}
 LOW_BATTERY_NOTIFIED: set[str] = set()
 MUTED_DEVICES: dict[str, bool] = {}
 GLOBAL_MUTED = False
@@ -130,6 +137,9 @@ SCRIPT_ACTIONS: dict[str, dict[str, Any]] = {}
 SCRIPT_ACTION_ALIASES: dict[str, str] = {}
 MEDIA_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 MEDIA_STREAMS: dict[tuple[str, str], "MediaStreamProxy"] = {}
+LAST_CPU_SAMPLE: dict[str, int] | None = None
+LAST_SYSTEM_INFO: dict[str, Any] | None = None
+LAST_SYSTEM_INFO_AT = 0.0
 STATE_LOCK = threading.RLock()
 TIMER_CONDITION = threading.Condition(STATE_LOCK)
 
@@ -1071,6 +1081,55 @@ def clean_mission_title(value: str) -> str:
     return cleaned[:160]
 
 
+def clean_note_text(value: str) -> str:
+    return str(value).replace("\r\n", "\n").replace("\r", "\n")[:10000]
+
+
+def public_r1_note() -> dict[str, Any]:
+    return {
+        "label": "r1-note",
+        "text": str(R1_NOTE.get("text", "")),
+        "updated_at": int(R1_NOTE.get("updated_at", 0) or 0),
+    }
+
+
+def save_r1_note() -> None:
+    directory = os.path.dirname(R1_NOTE_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temp_path = f"{R1_NOTE_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(public_r1_note(), handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, R1_NOTE_PATH)
+
+
+def load_r1_note() -> None:
+    try:
+        with open(R1_NOTE_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"Could not load r1-note: {exc}")
+        return
+    if not isinstance(payload, dict):
+        return
+    R1_NOTE["label"] = "r1-note"
+    R1_NOTE["text"] = clean_note_text(str(payload.get("text", "")))
+    R1_NOTE["updated_at"] = int(payload.get("updated_at", 0) or 0)
+
+
+def set_r1_note(payload: dict[str, Any], updated_by: str = "local") -> dict[str, Any]:
+    now = int(time.time())
+    R1_NOTE["label"] = "r1-note"
+    R1_NOTE["text"] = clean_note_text(str(payload.get("text", payload.get("note", ""))))
+    R1_NOTE["updated_at"] = int(payload.get("updated_at", now) or now)
+    R1_NOTE["updated_by"] = str(updated_by)[:80]
+    save_r1_note()
+    return public_r1_note()
+
+
 def local_date_text(timestamp: int | None = None) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(timestamp or int(time.time())))
 
@@ -1914,6 +1973,216 @@ def uptime_worker() -> None:
         time.sleep(5)
 
 
+def read_cpu_times() -> dict[str, int] | None:
+    try:
+        with open("/proc/stat", "r", encoding="utf-8") as handle:
+            first = handle.readline().split()
+    except OSError:
+        return None
+    if not first or first[0] != "cpu":
+        return None
+    values = [int(value) for value in first[1:]]
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    total = sum(values)
+    return {"idle": idle, "total": total}
+
+
+def cpu_usage_percent() -> float | None:
+    global LAST_CPU_SAMPLE
+    current = read_cpu_times()
+    if not current:
+        return None
+    previous = LAST_CPU_SAMPLE
+    LAST_CPU_SAMPLE = current
+    if not previous:
+        return None
+    total_delta = current["total"] - previous["total"]
+    idle_delta = current["idle"] - previous["idle"]
+    if total_delta <= 0:
+        return None
+    return round(max(0.0, min(100.0, (1.0 - (idle_delta / total_delta)) * 100.0)), 1)
+
+
+def memory_info() -> dict[str, Any]:
+    values: dict[str, int] = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) >= 2:
+                    values[parts[0].rstrip(":")] = int(parts[1]) * 1024
+    except OSError:
+        return {}
+
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    swap_total = values.get("SwapTotal")
+    swap_free = values.get("SwapFree")
+    used = total - available if total is not None and available is not None else None
+    swap_used = swap_total - swap_free if swap_total is not None and swap_free is not None else None
+    return {
+        "total_bytes": total,
+        "available_bytes": available,
+        "used_bytes": used,
+        "used_percent": round((used / total) * 100, 1) if total and used is not None else None,
+        "swap_total_bytes": swap_total,
+        "swap_used_bytes": swap_used,
+        "swap_used_percent": round((swap_used / swap_total) * 100, 1) if swap_total and swap_used is not None else None,
+    }
+
+
+def disk_info(path: str, label: str) -> dict[str, Any]:
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError as exc:
+        return {"label": label, "path": path, "error": str(exc)}
+    used = usage.total - usage.free
+    return {
+        "label": label,
+        "path": path,
+        "total_bytes": usage.total,
+        "used_bytes": used,
+        "free_bytes": usage.free,
+        "used_percent": round((used / usage.total) * 100, 1) if usage.total else None,
+    }
+
+
+def gpu_info_from_nvidia_smi() -> list[dict[str, Any]]:
+    if not shutil.which("nvidia-smi"):
+        return []
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+    except Exception:
+        return []
+    if completed.returncode != 0:
+        return []
+    gpus = []
+    for index, line in enumerate(completed.stdout.splitlines()):
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 5:
+            continue
+        memory_used = int(parts[2]) * 1024 * 1024 if parts[2].isdigit() else None
+        memory_total = int(parts[3]) * 1024 * 1024 if parts[3].isdigit() else None
+        gpus.append({
+            "id": f"nvidia-{index}",
+            "name": parts[0],
+            "provider": "nvidia-smi",
+            "usage_percent": float(parts[1]) if parts[1].replace(".", "", 1).isdigit() else None,
+            "memory_used_bytes": memory_used,
+            "memory_total_bytes": memory_total,
+            "memory_used_percent": round((memory_used / memory_total) * 100, 1) if memory_used is not None and memory_total else None,
+            "temperature_c": int(parts[4]) if parts[4].isdigit() else None,
+        })
+    return gpus
+
+
+def gpu_info_from_drm() -> list[dict[str, Any]]:
+    gpus = []
+    for card_path in sorted(glob.glob("/sys/class/drm/card[0-9]")):
+        busy_path = os.path.join(card_path, "device", "gpu_busy_percent")
+        if not os.path.exists(busy_path):
+            continue
+        try:
+            with open(busy_path, "r", encoding="utf-8") as handle:
+                usage = float(handle.read().strip())
+        except OSError:
+            continue
+        name = os.path.basename(card_path)
+        vendor_path = os.path.join(card_path, "device", "vendor")
+        device_path = os.path.join(card_path, "device", "device")
+        vendor = ""
+        device = ""
+        try:
+            with open(vendor_path, "r", encoding="utf-8") as handle:
+                vendor = handle.read().strip()
+            with open(device_path, "r", encoding="utf-8") as handle:
+                device = handle.read().strip()
+        except OSError:
+            pass
+        gpus.append({
+            "id": name,
+            "name": f"{name} {vendor} {device}".strip(),
+            "provider": "drm",
+            "usage_percent": round(usage, 1),
+        })
+    return gpus
+
+
+def load_average() -> dict[str, float] | None:
+    try:
+        one, five, fifteen = os.getloadavg()
+    except OSError:
+        return None
+    return {"1m": round(one, 2), "5m": round(five, 2), "15m": round(fifteen, 2)}
+
+
+def system_info_snapshot() -> dict[str, Any]:
+    global LAST_SYSTEM_INFO, LAST_SYSTEM_INFO_AT
+    now = time.monotonic()
+    if LAST_SYSTEM_INFO is not None and now - LAST_SYSTEM_INFO_AT < 2.0:
+        return LAST_SYSTEM_INFO
+
+    server_dir = os.path.dirname(os.path.realpath(__file__))
+    gpus = gpu_info_from_nvidia_smi() or gpu_info_from_drm()
+    info = {
+        "collected_at": int(time.time()),
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "cpu": {
+            "usage_percent": cpu_usage_percent(),
+            "load_average": load_average(),
+            "core_count": os.cpu_count(),
+        },
+        "memory": memory_info(),
+        "storage": [
+            disk_info("/", "Root"),
+            disk_info(server_dir, "Server directory"),
+        ],
+        "gpus": gpus,
+        "gpu_note": "" if gpus else "No GPU telemetry detected",
+    }
+    LAST_SYSTEM_INFO = info
+    LAST_SYSTEM_INFO_AT = now
+    return info
+
+
+def relay_safe_system_info(value: Any, key: str = "") -> Any:
+    lowered_key = key.lower()
+    if "ip" in lowered_key or "addr" in lowered_key or "address" in lowered_key:
+        return None
+    if isinstance(value, dict):
+        result = {}
+        for child_key, child_value in value.items():
+            cleaned = relay_safe_system_info(child_value, str(child_key))
+            if cleaned is not None:
+                result[child_key] = cleaned
+        return result
+    if isinstance(value, list):
+        return [
+            cleaned
+            for item in value
+            if (cleaned := relay_safe_system_info(item, key)) is not None
+        ]
+    if isinstance(value, str):
+        redacted = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[redacted-ip]", value)
+        if re.fullmatch(r"[0-9a-fA-F:]{3,}", redacted) and ":" in redacted:
+            return "[redacted-ip]"
+        return redacted
+    return value
+
+
 def dashboard_snapshot() -> dict[str, Any]:
     devices = [dashboard_device(device_id) for device_id in sorted(DEVICES)]
     online_count = sum(1 for device in devices if device.get("online"))
@@ -1938,6 +2207,7 @@ def dashboard_snapshot() -> dict[str, Any]:
             "media_stream_idle_seconds": MEDIA_STREAM_IDLE_SECONDS,
             "diagnostics": startup_diagnostics(),
             "restart_enabled": RESTART_ENABLED,
+            "system": system_info_snapshot(),
         },
         "summary": {
             "device_count": len(devices),
@@ -1957,6 +2227,7 @@ def dashboard_snapshot() -> dict[str, Any]:
         "recent_rule_runs": RECENT_RULE_RUNS[-20:],
         "uptime_monitors": [public_uptime_monitor(UPTIME_MONITORS[monitor_id]) for monitor_id in sorted(UPTIME_MONITORS)],
         "mission_board": mission_board_summary(),
+        "r1_note": public_r1_note(),
         "active_timers": active_timer_summary(),
         "devices": devices,
         "recent_commands": RECENT_COMMANDS[-20:],
@@ -1971,11 +2242,13 @@ def external_dashboard_snapshot() -> dict[str, Any]:
             "started_at": snapshot["server"].get("started_at"),
             "uptime_seconds": snapshot["server"].get("uptime_seconds"),
             "device_stale_seconds": snapshot["server"].get("device_stale_seconds"),
+            "system": relay_safe_system_info(snapshot["server"].get("system", {})),
         },
         "summary": snapshot.get("summary", {}),
         "devices": [],
         "uptime_monitors": snapshot.get("uptime_monitors", []),
         "mission_board": snapshot.get("mission_board", {}),
+        "r1_note": snapshot.get("r1_note", {}),
         "recent_button_events": snapshot.get("recent_button_events", []),
         "recent_rule_runs": snapshot.get("recent_rule_runs", []),
     }
@@ -2216,6 +2489,7 @@ def relay_sync_worker() -> None:
                 with STATE_LOCK:
                     snapshot = external_dashboard_snapshot()
                 relay_request_json("/sync/dashboard-snapshot", method="POST", payload=snapshot)
+                relay_request_json("/sync/r1-note", method="POST", payload=snapshot.get("r1_note", {}))
                 next_snapshot_at = now + RELAY_SNAPSHOT_SECONDS
 
             status_payload = relay_request_json("/sync/device-statuses")
@@ -3610,6 +3884,11 @@ DASHBOARD_HTML = """<!doctype html>
       gap: 22px;
       align-items: start;
     }
+    .overview-system {
+      align-items: stretch;
+      margin-bottom: 18px;
+    }
+    .overview-system > .panel { height: 100%; }
     .panel-stack {
       display: grid;
       gap: 18px;
@@ -3889,6 +4168,50 @@ DASHBOARD_HTML = """<!doctype html>
       font-size: 12.5px;
     }
     .kv-key { color: var(--muted); }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+      padding: 12px;
+    }
+    .metric-card {
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 12px;
+      background: var(--panel);
+      min-width: 0;
+    }
+    .metric-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .metric-value {
+      margin-top: 7px;
+      font-family: var(--display);
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--bright);
+    }
+    .meter {
+      height: 7px;
+      margin-top: 9px;
+      overflow: hidden;
+      border: 1px solid var(--line-bright);
+      border-radius: 2px;
+      background: var(--inset);
+    }
+    .meter-fill {
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, var(--accent), var(--good));
+      box-shadow: 0 0 10px var(--accent-glow);
+    }
     .diagnostics { display: grid; gap: 8px; padding: 12px; }
     .diagnostic {
       display: flex;
@@ -4032,23 +4355,23 @@ DASHBOARD_HTML = """<!doctype html>
   <main>
     <section class="tab-panel active" data-tab-panel="overview">
       <section class="stats" id="stats"></section>
-      <section class="overview-grid">
+      <section class="grid overview-system">
+        <div class="panel">
+          <h2>Host Resources</h2>
+          <div class="metric-grid" id="serverMetrics"></div>
+        </div>
         <div class="panel-stack">
-          <div class="panel collapsible-panel" data-panel-id="attention">
-            <div class="panel-header">
-              <h2>Attention</h2>
-              <button class="collapse-button" type="button" aria-label="Toggle Attention" aria-expanded="true">-</button>
-            </div>
-            <div class="events collapsible-content" id="attention"></div>
+          <div class="panel">
+            <h2>Host Details</h2>
+            <div class="events" id="serverDetails"></div>
           </div>
-          <div class="panel collapsible-panel" data-panel-id="recentActivity">
-            <div class="panel-header">
-              <h2>Recent Activity</h2>
-              <button class="collapse-button" type="button" aria-label="Toggle Recent Activity" aria-expanded="true">-</button>
-            </div>
-            <div class="events collapsible-content" id="activity"></div>
+          <div class="panel" id="serverGpuPanel">
+            <h2>GPU</h2>
+            <div class="events" id="serverGpu"></div>
           </div>
         </div>
+      </section>
+      <section class="overview-grid">
         <div class="panel-stack">
           <div class="panel collapsible-panel" data-panel-id="startup">
             <div class="panel-header">
@@ -4079,6 +4402,34 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
             </div>
             <div class="events" id="timers"></div>
+          </div>
+          <div class="panel">
+            <h2>r1-note</h2>
+            <div class="events">
+              <form class="action-form" id="r1NoteForm">
+                <textarea id="r1NoteText" placeholder="Note text"></textarea>
+                <div class="action-row">
+                  <button type="submit">Save Note</button>
+                  <span class="meta" id="r1NoteMeta"></span>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        <div class="panel-stack">
+          <div class="panel collapsible-panel" data-panel-id="attention">
+            <div class="panel-header">
+              <h2>Attention</h2>
+              <button class="collapse-button" type="button" aria-label="Toggle Attention" aria-expanded="true">-</button>
+            </div>
+            <div class="events collapsible-content" id="attention"></div>
+          </div>
+          <div class="panel collapsible-panel" data-panel-id="recentActivity">
+            <div class="panel-header">
+              <h2>Recent Activity</h2>
+              <button class="collapse-button" type="button" aria-label="Toggle Recent Activity" aria-expanded="true">-</button>
+            </div>
+            <div class="events collapsible-content" id="activity"></div>
           </div>
         </div>
       </section>
@@ -4360,7 +4711,6 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderStats(data) {
       const stats = document.getElementById("stats");
-      stats.replaceChildren();
       const items = [
         ["Devices", data.summary.device_count],
         ["Online", data.summary.online_count],
@@ -4372,11 +4722,26 @@ DASHBOARD_HTML = """<!doctype html>
         ["Buttons", data.summary.recent_button_event_count],
         ["Firmware", (data.firmware_catalog || []).length],
       ];
-      for (const [label, value] of items) {
+      const existingCards = Array.from(stats.children);
+      for (const [index, [label, value]] of items.entries()) {
+        const displayedValue = String(value);
+        const existingCard = existingCards[index];
+        if (existingCard?.dataset.label === label && existingCard.dataset.value === displayedValue) {
+          continue;
+        }
         const card = el("div", "stat");
+        card.dataset.label = label;
+        card.dataset.value = displayedValue;
         card.append(el("div", "label", label));
         card.append(el("span", "value", value));
-        stats.append(card);
+        if (existingCard) {
+          existingCard.replaceWith(card);
+        } else {
+          stats.append(card);
+        }
+      }
+      for (const extraCard of existingCards.slice(items.length)) {
+        extraCard.remove();
       }
     }
 
@@ -5230,6 +5595,110 @@ DASHBOARD_HTML = """<!doctype html>
       return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
     }
 
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes)) return "-";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let value = Number(bytes);
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+    }
+
+    function formatPercent(value) {
+      return Number.isFinite(value) ? `${Number(value).toFixed(1)}%` : "-";
+    }
+
+    function metricCard(label, value, percent, detail = "") {
+      const card = el("div", "metric-card");
+      const head = el("div", "metric-head");
+      head.append(el("span", "", label));
+      head.append(el("span", "", formatPercent(percent)));
+      card.append(head);
+      card.append(el("div", "metric-value", value));
+      const meter = el("div", "meter");
+      const fill = el("div", "meter-fill");
+      fill.style.width = `${Math.max(0, Math.min(100, Number(percent) || 0))}%`;
+      meter.append(fill);
+      card.append(meter);
+      if (detail) card.append(el("div", "meta", detail));
+      return card;
+    }
+
+    function renderServerDetails(server) {
+      const system = server?.system || {};
+      const metricsRoot = document.getElementById("serverMetrics");
+      const detailsRoot = document.getElementById("serverDetails");
+      const gpuRoot = document.getElementById("serverGpu");
+      const gpuPanel = document.getElementById("serverGpuPanel");
+      metricsRoot.replaceChildren();
+      detailsRoot.replaceChildren();
+      gpuRoot.replaceChildren();
+
+      const cpu = system.cpu || {};
+      const memory = system.memory || {};
+      metricsRoot.append(metricCard(
+        "CPU",
+        cpu.usage_percent === null || cpu.usage_percent === undefined ? "Sampling" : formatPercent(cpu.usage_percent),
+        cpu.usage_percent,
+        cpu.load_average ? `load ${cpu.load_average["1m"]} / ${cpu.load_average["5m"]} / ${cpu.load_average["15m"]} | ${text(cpu.core_count)} core(s)` : `${text(cpu.core_count)} core(s)`
+      ));
+      metricsRoot.append(metricCard(
+        "RAM",
+        `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)}`,
+        memory.used_percent,
+        `${formatBytes(memory.available_bytes)} available`
+      ));
+      if (Number(memory.swap_total_bytes || 0) > 0) {
+        metricsRoot.append(metricCard(
+          "Swap",
+          `${formatBytes(memory.swap_used_bytes)} / ${formatBytes(memory.swap_total_bytes)}`,
+          memory.swap_used_percent
+        ));
+      }
+      for (const disk of system.storage || []) {
+        metricsRoot.append(metricCard(
+          disk.label || disk.path || "Storage",
+          disk.error ? "Unavailable" : `${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)}`,
+          disk.used_percent,
+          disk.error || `${formatBytes(disk.free_bytes)} free | ${text(disk.path)}`
+        ));
+      }
+
+      const details = el("div", "event");
+      details.append(keyValueRows([
+        ["Hostname", system.hostname],
+        ["Platform", system.platform],
+        ["Python", system.python],
+        ["Server", `${server.host}:${server.port}`],
+        ["Started", server.started_at ? new Date(server.started_at * 1000).toLocaleString() : ""],
+        ["Uptime", uptime(server.uptime_seconds)],
+        ["Collected", system.collected_at ? new Date(system.collected_at * 1000).toLocaleTimeString() : ""],
+      ]));
+      detailsRoot.append(details);
+
+      const gpus = system.gpus || [];
+      if (!gpus.length) {
+        if (gpuPanel) gpuPanel.style.display = "none";
+        return;
+      }
+      if (gpuPanel) gpuPanel.style.display = "";
+      for (const gpu of gpus) {
+        const item = el("div", "event");
+        item.append(el("div", "device-id", text(gpu.name || gpu.id)));
+        item.append(el("div", "meta", `${text(gpu.provider)} | usage ${formatPercent(gpu.usage_percent)}`));
+        if (gpu.memory_total_bytes) {
+          item.append(el("div", "meta", `memory ${formatBytes(gpu.memory_used_bytes)} / ${formatBytes(gpu.memory_total_bytes)} (${formatPercent(gpu.memory_used_percent)})`));
+        }
+        if (gpu.temperature_c !== null && gpu.temperature_c !== undefined) {
+          item.append(el("div", "meta", `temperature ${gpu.temperature_c} C`));
+        }
+        gpuRoot.append(item);
+      }
+    }
+
     async function createUptimeMonitor(event) {
       event.preventDefault();
       const result = document.getElementById("uptimeFormResult");
@@ -5557,11 +6026,41 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function renderR1Note(note) {
+      const input = document.getElementById("r1NoteText");
+      const meta = document.getElementById("r1NoteMeta");
+      const value = note?.text || "";
+      if (document.activeElement !== input && input.value !== value) {
+        input.value = value;
+      }
+      meta.textContent = note?.updated_at ? `Updated ${new Date(note.updated_at * 1000).toLocaleString()}` : "Not set";
+    }
+
+    async function saveR1Note(event) {
+      event.preventDefault();
+      const result = document.getElementById("r1NoteMeta");
+      result.textContent = "Saving...";
+      try {
+        const response = await fetch("/r1-note", {
+          method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({text: document.getElementById("r1NoteText").value}),
+        });
+        const body = await response.json();
+        if (!response.ok || body.ok === false) throw new Error(body.error || `HTTP ${response.status}`);
+        renderR1Note(body.r1_note);
+      } catch (error) {
+        result.textContent = error.message;
+      }
+    }
+
     function render(data) {
       document.getElementById("serverMeta").textContent =
         `Listening on ${data.server.host}:${data.server.port} | uptime ${uptime(data.server.uptime_seconds)} | stale after ${data.server.device_stale_seconds}s`;
       configureRestartButton(data.server);
+      renderR1Note(data.r1_note);
       renderStats(data);
+      renderServerDetails(data.server);
       renderAttention(data.devices);
       renderActivity(data);
       renderDiagnostics(data.server.diagnostics);
@@ -5611,6 +6110,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshButton").addEventListener("click", refresh);
     document.getElementById("simulateButton").addEventListener("click", simulateTranscript);
     document.getElementById("restartButton").addEventListener("click", restartServer);
+    document.getElementById("r1NoteForm").addEventListener("submit", saveR1Note);
     document.getElementById("missionForm").addEventListener("submit", createMissionTask);
     document.getElementById("openMissionForm").addEventListener("click", openMissionFormModal);
     document.getElementById("closeMissionForm").addEventListener("click", closeMissionFormModal);
@@ -6153,6 +6653,11 @@ class CommandHandler(BaseHTTPRequestHandler):
                 payload = mission_board_summary()
             json_response(self, 200, payload)
             return
+        if parsed.path == "/r1-note":
+            with STATE_LOCK:
+                payload = public_r1_note()
+            json_response(self, 200, payload)
+            return
         if parsed.path == "/events/recent":
             with STATE_LOCK:
                 payload = {"recent_rule_runs": RECENT_RULE_RUNS[-20:]}
@@ -6313,6 +6818,16 @@ class CommandHandler(BaseHTTPRequestHandler):
                     task = complete_mission_task(task_id, completed_by=completed_by)
                     board = mission_board_summary()
                 json_response(self, 200, {"ok": True, "task": task, "mission_board": board})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/r1-note":
+            try:
+                payload = read_optional_json_body(self)
+                with STATE_LOCK:
+                    note = set_r1_note(payload, updated_by="api")
+                json_response(self, 200, {"ok": True, "r1_note": note})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
@@ -6578,6 +7093,15 @@ class CommandHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/r1-note":
+            try:
+                payload = read_optional_json_body(self)
+                with STATE_LOCK:
+                    note = set_r1_note(payload, updated_by="api")
+                json_response(self, 200, {"ok": True, "r1_note": note})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
         if parsed.path.startswith("/firmware/bin/"):
             parts = parsed.path.strip("/").split("/", 4)
             if len(parts) != 5:
@@ -6668,6 +7192,7 @@ def main() -> None:
     load_timers()
     load_uptime_monitors()
     load_mission_tasks()
+    load_r1_note()
     threading.Thread(target=timer_worker, name="timer-worker", daemon=True).start()
     threading.Thread(target=uptime_worker, name="uptime-worker", daemon=True).start()
     if RELAY_ENABLED:
