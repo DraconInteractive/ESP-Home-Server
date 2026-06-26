@@ -16,6 +16,41 @@ from .http_util import client_ip
 from .util import clean_id, clean_ip_list, clean_port_list, clean_mission_task_type, json_obj
 
 
+_SPOTIFY_CODES: dict[str, tuple[str, float]] = {}
+_SPOTIFY_CODE_TTL = 600
+
+
+def clean_spotify_state(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.:-]+", "", str(value).strip())[:128]
+
+
+def clean_spotify_code(value: str) -> str:
+    return str(value).strip()[:4096]
+
+
+def store_spotify_code(state: str, code: str) -> None:
+    cleaned_state = clean_spotify_state(state)
+    cleaned_code = clean_spotify_code(code)
+    if not cleaned_state or not cleaned_code:
+        raise ValueError("state and code are required")
+    _SPOTIFY_CODES[cleaned_state] = (cleaned_code, time.time())
+
+
+def pop_spotify_code(state: str) -> str | None:
+    cleaned_state = clean_spotify_state(state)
+    if not cleaned_state:
+        return None
+    entry = _SPOTIFY_CODES.get(cleaned_state)
+    if not entry:
+        return None
+    code, received_at = entry
+    if time.time() - received_at > _SPOTIFY_CODE_TTL:
+        _SPOTIFY_CODES.pop(cleaned_state, None)
+        return None
+    _SPOTIFY_CODES.pop(cleaned_state, None)
+    return code
+
+
 # --- Row -> dict projections ------------------------------------------------
 
 def public_device(row: sqlite3.Row) -> dict[str, Any]:

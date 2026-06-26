@@ -63,6 +63,32 @@ class RelayHandler(BaseHTTPRequestHandler):
             json_response(self, 200, {"ok": True, "external_ip": client_ip(self)})
             return
 
+        if path == "/spotify/callback":
+            code = query.get("code", [None])[0]
+            state = query.get("state", [None])[0]
+            if not code or not state:
+                json_response(self, 400, {"ok": False, "error": "missing code or state"})
+                return
+            try:
+                with config.STATE_LOCK:
+                    store.store_spotify_code(state, code)
+                html_response(
+                    self,
+                    200,
+                    (
+                        "<!doctype html><html><head><meta charset='utf-8'>"
+                        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                        "<title>Spotify Authorised</title></head>"
+                        "<body style='font-family:sans-serif;text-align:center;padding-top:80px'>"
+                        "<h2>Spotify authorised</h2>"
+                        "<p>You can close this tab and return to R1 Shell.</p>"
+                        "</body></html>"
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
         if path == "/r1-note":
             if not self._require(require_dashboard_access(self)):
                 return
@@ -77,6 +103,18 @@ class RelayHandler(BaseHTTPRequestHandler):
             with config.STATE_LOCK:
                 note = store.latest_r1_note()
             json_response(self, 200, {"ok": True, "r1_note": note})
+            return
+
+        if path == "/sync/spotify-code":
+            if not self._require(require_static_token(self, config.SYNC_TOKEN, "sync")):
+                return
+            state = query.get("state", [None])[0]
+            if not state:
+                json_response(self, 400, {"ok": False, "error": "state required"})
+                return
+            with config.STATE_LOCK:
+                code = store.pop_spotify_code(state)
+            json_response(self, 200, {"ok": True, "code": code})
             return
 
         if path == "/sync/events":

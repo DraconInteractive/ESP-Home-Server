@@ -95,7 +95,12 @@ Public health:
 
 ```text
 GET /health
+GET /spotify/callback
 ```
+
+`GET /spotify/callback` is the public Spotify OAuth redirect target. Spotify
+passes `code` and `state` query parameters; the relay stores the code in memory
+for up to 10 minutes so the R1 can retrieve it once.
 
 Dashboard:
 
@@ -180,6 +185,7 @@ Home server sync:
 POST /sync/dashboard-snapshot
 GET  /sync/r1-note
 POST /sync/r1-note
+GET  /sync/spotify-code
 GET  /sync/device-statuses
 GET  /sync/events
 POST /sync/events/{event_id}/ack
@@ -187,6 +193,10 @@ POST /sync/events/{event_id}/ack
 
 `POST /sync/r1-note` is the only relay route that provisions the relay copy of
 the note, and it requires `RELAY_SYNC_TOKEN`.
+
+`GET /sync/spotify-code?state=<state>` lets the R1 poll for a Spotify OAuth
+code. It returns `{"ok": true, "code": null}` until the callback arrives, then
+returns the code once and deletes it from memory.
 
 Sync endpoints require:
 
