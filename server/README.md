@@ -150,9 +150,13 @@ curl -X PUT http://127.0.0.1:8080/r1-note \
 }
 ```
 
+- `POST /r1-update` saves a new R1 Shell APK update manifest.
 - `GET /r1-apk/{filename}` downloads an APK from
   `COMMAND_SERVER_R1_APK_DIR` with content type
   `application/vnd.android.package-archive`.
+- `PUT /r1-apk/{filename}` uploads an APK to `COMMAND_SERVER_R1_APK_DIR` and
+  returns its URL, size, and SHA-256 digest. The dashboard's `R1 Shell` tab uses
+  this upload response to save the update manifest.
 - `GET /health` returns a basic health check.
 - `GET /actions` returns the configured packaged server actions.
 - `POST /actions/{action_name}/run` runs a configured action. If an action is

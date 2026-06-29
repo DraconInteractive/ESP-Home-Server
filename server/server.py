@@ -38,6 +38,7 @@ ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "scribe_v2")
 MAX_AUDIO_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_AUDIO_BYTES", str(4 * 1024 * 1024)))
 MAX_FIRMWARE_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_FIRMWARE_BYTES", str(8 * 1024 * 1024)))
+MAX_R1_APK_BYTES = int(os.environ.get("COMMAND_SERVER_MAX_R1_APK_BYTES", str(128 * 1024 * 1024)))
 DEVICE_STALE_SECONDS = int(os.environ.get("COMMAND_SERVER_DEVICE_STALE_SECONDS", "45"))
 DEVICE_PING_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_SERVER_DEVICE_PING_TIMEOUT_SECONDS", "2.0"))
 LOW_BATTERY_THRESHOLD_PERCENT = float(os.environ.get("COMMAND_SERVER_LOW_BATTERY_THRESHOLD_PERCENT", "20"))
@@ -793,6 +794,51 @@ def r1_update_manifest() -> dict[str, Any]:
             manifest["size_bytes"] = max(0, int(payload.get("size_bytes")))
     except (TypeError, ValueError):
         pass
+    sha256 = clean_sha256(str(payload.get("sha256", "")))
+    if sha256:
+        manifest["sha256"] = sha256
+    notes = str(payload.get("notes", "")).strip()
+    if notes:
+        manifest["notes"] = notes[:2000]
+    return manifest
+
+
+def save_r1_update_manifest(payload: dict[str, Any]) -> dict[str, Any]:
+    manifest = r1_update_manifest_from_payload(payload)
+    directory = os.path.dirname(R1_UPDATE_MANIFEST_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temp_path = f"{R1_UPDATE_MANIFEST_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_path, R1_UPDATE_MANIFEST_PATH)
+    return manifest
+
+
+def r1_update_manifest_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("ok") is False:
+        return {"ok": False}
+    try:
+        version_code = int(payload.get("version_code"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("version_code is required") from exc
+    version_name = str(payload.get("version_name", "")).strip()[:80]
+    url = str(payload.get("url", "")).strip()[:240]
+    if version_code < 0:
+        raise ValueError("version_code must be non-negative")
+    if not version_name:
+        raise ValueError("version_name is required")
+    if not url:
+        raise ValueError("url is required")
+    manifest: dict[str, Any] = {
+        "ok": True,
+        "version_code": version_code,
+        "version_name": version_name,
+        "url": url,
+    }
+    if payload.get("size_bytes") is not None:
+        manifest["size_bytes"] = max(0, int(payload.get("size_bytes")))
     sha256 = clean_sha256(str(payload.get("sha256", "")))
     if sha256:
         manifest["sha256"] = sha256
@@ -2295,6 +2341,7 @@ def dashboard_snapshot() -> dict[str, Any]:
         "uptime_monitors": [public_uptime_monitor(UPTIME_MONITORS[monitor_id]) for monitor_id in sorted(UPTIME_MONITORS)],
         "mission_board": mission_board_summary(),
         "r1_note": public_r1_note(),
+        "r1_update": r1_update_manifest(),
         "active_timers": active_timer_summary(),
         "devices": devices,
         "recent_commands": RECENT_COMMANDS[-20:],
@@ -4418,6 +4465,7 @@ DASHBOARD_HTML = """<!doctype html>
     <button class="tab-button" type="button" data-tab="rules">Rules</button>
     <button class="tab-button" type="button" data-tab="actions">Actions</button>
     <button class="tab-button" type="button" data-tab="firmware">Firmware</button>
+    <button class="tab-button" type="button" data-tab="r1shell">R1 Shell</button>
   </nav>
   <main>
     <section class="tab-panel active" data-tab-panel="overview">
@@ -4469,18 +4517,6 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
             </div>
             <div class="events" id="timers"></div>
-          </div>
-          <div class="panel">
-            <h2>r1-note</h2>
-            <div class="events">
-              <form class="action-form" id="r1NoteForm">
-                <textarea id="r1NoteText" placeholder="Note text"></textarea>
-                <div class="action-row">
-                  <button type="submit">Save Note</button>
-                  <span class="meta" id="r1NoteMeta"></span>
-                </div>
-              </form>
-            </div>
           </div>
         </div>
         <div class="panel-stack">
@@ -4622,6 +4658,38 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Firmware Catalog</h2>
         <div class="events" id="firmwareCatalog"></div>
       </div>
+    </section>
+    <section class="tab-panel" data-tab-panel="r1shell">
+      <section class="grid">
+        <div class="panel">
+          <h2>R1 Shell Update</h2>
+          <div class="events">
+            <form class="action-form" id="r1UpdateForm">
+              <input id="r1VersionCode" type="number" min="0" step="1" placeholder="Version code" autocomplete="off">
+              <input id="r1VersionName" type="text" placeholder="Version name, e.g. 0.2.0" autocomplete="off">
+              <input id="r1ApkFile" type="file" accept=".apk,application/vnd.android.package-archive">
+              <textarea id="r1UpdateNotes" placeholder="Release notes"></textarea>
+              <div class="action-row">
+                <button type="submit">Upload Update</button>
+                <span class="meta" id="r1UpdateMeta"></span>
+              </div>
+            </form>
+          </div>
+          <div class="events" id="r1UpdateCurrent"></div>
+        </div>
+        <div class="panel">
+          <h2>r1-note</h2>
+          <div class="events">
+            <form class="action-form" id="r1NoteForm">
+              <textarea id="r1NoteText" placeholder="Note text"></textarea>
+              <div class="action-row">
+                <button type="submit">Save Note</button>
+                <span class="meta" id="r1NoteMeta"></span>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
   <div class="modal-backdrop" id="removeModal" role="dialog" aria-modal="true" aria-labelledby="removeTitle">
@@ -6121,11 +6189,100 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function cleanApkFilename(value, versionName) {
+      const fallback = `r1shell-${versionName || "update"}.apk`;
+      const name = String(value || fallback).split(/[\\\\/]/).pop() || fallback;
+      const cleaned = name.replace(/[^a-zA-Z0-9_.-]+/g, "-").slice(0, 120) || fallback;
+      return cleaned.toLowerCase().endsWith(".apk") ? cleaned : `${cleaned}.apk`;
+    }
+
+    function renderR1Update(manifest) {
+      const current = document.getElementById("r1UpdateCurrent");
+      current.replaceChildren();
+      const data = manifest || {ok: false};
+      if (document.activeElement && document.activeElement.closest("#r1UpdateForm")) {
+        return;
+      }
+      if (data.ok) {
+        document.getElementById("r1VersionCode").value = data.version_code ?? "";
+        document.getElementById("r1VersionName").value = data.version_name || "";
+        document.getElementById("r1UpdateNotes").value = data.notes || "";
+      }
+      const item = el("div", "event");
+      if (!data.ok) {
+        item.append(el("div", "empty", "No R1 Shell update manifest configured."));
+        current.append(item);
+        return;
+      }
+      item.append(el("div", "device-id", `${text(data.version_name)} (${text(data.version_code)})`));
+      item.append(keyValueRows([
+        ["URL", data.url],
+        ["Size", data.size_bytes ? formatBytes(data.size_bytes) : ""],
+        ["SHA-256", data.sha256],
+        ["Notes", data.notes],
+      ]));
+      current.append(item);
+    }
+
+    async function saveR1Update(event) {
+      event.preventDefault();
+      const result = document.getElementById("r1UpdateMeta");
+      const file = document.getElementById("r1ApkFile").files[0];
+      const versionCode = Number(document.getElementById("r1VersionCode").value);
+      const versionName = document.getElementById("r1VersionName").value.trim();
+      if (!Number.isInteger(versionCode) || versionCode < 0) {
+        result.textContent = "Version code is required.";
+        return;
+      }
+      if (!versionName) {
+        result.textContent = "Version name is required.";
+        return;
+      }
+      if (!file) {
+        result.textContent = "APK file is required.";
+        return;
+      }
+      const filename = cleanApkFilename(file.name, versionName);
+      result.textContent = "Uploading APK...";
+      try {
+        const upload = await fetch(`/r1-apk/${encodeURIComponent(filename)}`, {
+          method: "PUT",
+          headers: {"Content-Type": "application/vnd.android.package-archive"},
+          body: file,
+        });
+        const uploadBody = await upload.json();
+        if (!upload.ok || uploadBody.ok === false) throw new Error(uploadBody.error || `Upload HTTP ${upload.status}`);
+        const apk = uploadBody.apk || {};
+        result.textContent = "Saving manifest...";
+        const manifestPayload = {
+          version_code: versionCode,
+          version_name: versionName,
+          url: apk.url || `/r1-apk/${filename}`,
+          size_bytes: apk.size_bytes,
+          sha256: apk.sha256,
+          notes: document.getElementById("r1UpdateNotes").value,
+        };
+        const response = await fetch("/r1-update", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(manifestPayload),
+        });
+        const body = await response.json();
+        if (!response.ok || body.ok === false) throw new Error(body.error || `Manifest HTTP ${response.status}`);
+        document.getElementById("r1ApkFile").value = "";
+        result.textContent = "Update saved.";
+        renderR1Update(body.manifest);
+      } catch (error) {
+        result.textContent = error.message;
+      }
+    }
+
     function render(data) {
       document.getElementById("serverMeta").textContent =
         `Listening on ${data.server.host}:${data.server.port} | uptime ${uptime(data.server.uptime_seconds)} | stale after ${data.server.device_stale_seconds}s`;
       configureRestartButton(data.server);
       renderR1Note(data.r1_note);
+      renderR1Update(data.r1_update);
       renderStats(data);
       renderServerDetails(data.server);
       renderAttention(data.devices);
@@ -6177,6 +6334,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshButton").addEventListener("click", refresh);
     document.getElementById("simulateButton").addEventListener("click", simulateTranscript);
     document.getElementById("restartButton").addEventListener("click", restartServer);
+    document.getElementById("r1UpdateForm").addEventListener("submit", saveR1Update);
     document.getElementById("r1NoteForm").addEventListener("submit", saveR1Note);
     document.getElementById("missionForm").addEventListener("submit", createMissionTask);
     document.getElementById("openMissionForm").addEventListener("click", openMissionFormModal);
@@ -6919,6 +7077,16 @@ class CommandHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
 
+        if parsed.path == "/r1-update":
+            try:
+                payload = read_optional_json_body(self)
+                with STATE_LOCK:
+                    manifest = save_r1_update_manifest(payload)
+                json_response(self, 200, {"ok": True, "manifest": manifest})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+
         if parsed.path.startswith("/actions/") and parsed.path.endswith("/run"):
             raw_name = unquote(parsed.path.removeprefix("/actions/").removesuffix("/run")).strip("/")
             try:
@@ -7186,6 +7354,24 @@ class CommandHandler(BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     note = set_r1_note(payload, updated_by="api")
                 json_response(self, 200, {"ok": True, "r1_note": note})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path.startswith("/r1-apk/"):
+            filename = parsed.path.removeprefix("/r1-apk/")
+            try:
+                body = read_request_body(self, MAX_R1_APK_BYTES)
+                cleaned_filename, path = r1_apk_path(filename)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as handle:
+                    handle.write(body)
+                metadata = {
+                    "filename": cleaned_filename,
+                    "url": f"/r1-apk/{cleaned_filename}",
+                    "size_bytes": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                }
+                json_response(self, 200, {"ok": True, "apk": metadata})
             except Exception as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             return
