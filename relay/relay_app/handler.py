@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
+import json
+import os
 from http.server import BaseHTTPRequestHandler
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import config, store
 from .auth import (
@@ -17,8 +19,8 @@ from .auth import (
     verify_dashboard_code,
 )
 from .dashboard import dashboard_html
-from .http_util import auth_error, client_ip, html_response, json_response, read_json_body
-from .util import clean_id
+from .http_util import auth_error, binary_response, client_ip, html_response, json_response, read_json_body
+from .util import clean_filename, clean_id, clean_sha256
 
 
 def _query_limit(query: dict[str, list[str]], key: str, default: int, low: int, high: int) -> int:
@@ -26,6 +28,58 @@ def _query_limit(query: dict[str, list[str]], key: str, default: int, low: int, 
         return max(low, min(int(query.get(key, [str(default)])[0]), high))
     except ValueError:
         return default
+
+
+def r1_update_manifest() -> dict[str, Any]:
+    try:
+        with open(config.R1_UPDATE_MANIFEST_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return {"ok": False}
+    except Exception as exc:
+        print(f"Could not load r1 update manifest: {exc}")
+        return {"ok": False}
+    if not isinstance(payload, dict) or payload.get("ok") is False:
+        return {"ok": False}
+
+    try:
+        version_code = int(payload.get("version_code"))
+    except (TypeError, ValueError):
+        return {"ok": False}
+    version_name = str(payload.get("version_name", "")).strip()[:80]
+    url = str(payload.get("url", "")).strip()[:240]
+    if version_code < 0 or not version_name or not url:
+        return {"ok": False}
+
+    manifest: dict[str, Any] = {
+        "ok": True,
+        "version_code": version_code,
+        "version_name": version_name,
+        "url": url,
+    }
+    try:
+        if payload.get("size_bytes") is not None:
+            manifest["size_bytes"] = max(0, int(payload.get("size_bytes")))
+    except (TypeError, ValueError):
+        pass
+    sha256 = clean_sha256(str(payload.get("sha256", "")))
+    if sha256:
+        manifest["sha256"] = sha256
+    notes = str(payload.get("notes", "")).strip()
+    if notes:
+        manifest["notes"] = notes[:2000]
+    return manifest
+
+
+def r1_apk_path(filename: str) -> tuple[str, str]:
+    cleaned_filename = clean_filename(unquote(filename), "r1-shell.apk")
+    if not cleaned_filename.lower().endswith(".apk"):
+        raise ValueError("APK filename must end with .apk")
+    path = os.path.realpath(os.path.join(config.R1_APK_DIR, cleaned_filename))
+    base = os.path.realpath(config.R1_APK_DIR)
+    if os.path.commonpath([base, path]) != base:
+        raise ValueError("APK path is outside configured directory")
+    return cleaned_filename, path
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -103,6 +157,31 @@ class RelayHandler(BaseHTTPRequestHandler):
             with config.STATE_LOCK:
                 note = store.latest_r1_note()
             json_response(self, 200, {"ok": True, "r1_note": note})
+            return
+
+        if path == "/r1-update":
+            if not self._require(require_static_token(self, config.SYNC_TOKEN, "sync")):
+                return
+            json_response(self, 200, r1_update_manifest())
+            return
+
+        if path.startswith("/r1-apk/"):
+            if not self._require(require_static_token(self, config.SYNC_TOKEN, "sync")):
+                return
+            filename = path.removeprefix("/r1-apk/")
+            try:
+                cleaned_filename, apk_path = r1_apk_path(filename)
+            except ValueError as exc:
+                json_response(self, 404, {"ok": False, "error": str(exc)})
+                return
+            if not os.path.isfile(apk_path):
+                json_response(self, 404, {"ok": False, "error": "APK not found"})
+                return
+            with open(apk_path, "rb") as handle:
+                body = handle.read()
+            binary_response(self, 200, "application/vnd.android.package-archive", body, {
+                "Content-Disposition": f'attachment; filename="{cleaned_filename}"',
+            })
             return
 
         if path == "/sync/spotify-code":

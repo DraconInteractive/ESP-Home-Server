@@ -51,6 +51,7 @@ Runtime state is stored locally:
 - `firmware-catalog.json` and `firmware-catalog/` for OTA catalog metadata and
   uploaded firmware binaries
 - `r1-note.json` for the `r1-note` text block
+- `r1-update.json` and `r1-apk/` for the R1 Shell APK update manifest and APKs
 
 Firmware versions use a semantic base plus channel suffix: `d` for development,
 `s` for staging, and `p` for production. Example: `0.0.1d`.
@@ -133,6 +134,25 @@ curl -X PUT http://127.0.0.1:8080/r1-note \
   --data '{"text":"Remember to check the relay."}'
 ```
 
+- `GET /r1-update` returns the R1 Shell APK update manifest from
+  `COMMAND_SERVER_R1_UPDATE_MANIFEST_PATH`, or `{"ok": false}` when no valid
+  manifest is present. Example manifest:
+
+```json
+{
+  "ok": true,
+  "version_code": 2,
+  "version_name": "0.2.0",
+  "url": "/r1-apk/r1shell-0.2.0.apk",
+  "size_bytes": 14680064,
+  "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "notes": "Adds dice, flashlight, QR generator."
+}
+```
+
+- `GET /r1-apk/{filename}` downloads an APK from
+  `COMMAND_SERVER_R1_APK_DIR` with content type
+  `application/vnd.android.package-archive`.
 - `GET /health` returns a basic health check.
 - `GET /actions` returns the configured packaged server actions.
 - `POST /actions/{action_name}/run` runs a configured action. If an action is

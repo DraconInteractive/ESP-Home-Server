@@ -185,6 +185,8 @@ Home server sync:
 POST /sync/dashboard-snapshot
 GET  /sync/r1-note
 POST /sync/r1-note
+GET  /r1-update
+GET  /r1-apk/{filename}
 GET  /sync/spotify-code
 GET  /sync/device-statuses
 GET  /sync/events
@@ -193,6 +195,13 @@ POST /sync/events/{event_id}/ack
 
 `POST /sync/r1-note` is the only relay route that provisions the relay copy of
 the note, and it requires `RELAY_SYNC_TOKEN`.
+
+`GET /r1-update` reads the APK update manifest from
+`RELAY_R1_UPDATE_MANIFEST_PATH`, or returns `{"ok": false}` when no valid
+manifest is present. The manifest `url` should point at `/r1-apk/{filename}`.
+`GET /r1-apk/{filename}` serves files from `RELAY_R1_APK_DIR` as
+`application/vnd.android.package-archive`. Both endpoints require
+`RELAY_SYNC_TOKEN`.
 
 `GET /sync/spotify-code?state=<state>` lets the R1 poll for a Spotify OAuth
 code. It returns `{"ok": true, "code": null}` until the callback arrives, then

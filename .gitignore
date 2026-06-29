@@ -8,6 +8,9 @@ server/device-registry.json
 server/rules.json
 server/timers.json
 server/uptime-monitors.json
+server/r1-note.json
+server/r1-update.json
+server/r1-apk/
 server/server.pid
 server/server.log
 server/server-state.sqlite3
@@ -16,6 +19,8 @@ server/firmware-catalog.json
 server/firmware-catalog/
 relay/.env.local
 relay/device-tokens.json
+relay/r1-update.json
+relay/r1-apk/
 relay/relay-state.sqlite3
 relay/relay-state.sqlite3-*
 

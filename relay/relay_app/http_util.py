@@ -32,6 +32,24 @@ def html_response(handler: BaseHTTPRequestHandler, status: int, body: str) -> No
     handler.wfile.write(encoded)
 
 
+def binary_response(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    content_type: str,
+    body: bytes,
+    extra_headers: dict[str, str] | None = None,
+) -> None:
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    if extra_headers:
+        for key, value in extra_headers.items():
+            handler.send_header(key, value)
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def auth_error(handler: BaseHTTPRequestHandler, result: "AuthResult") -> None:
     json_response(handler, result.status, {"ok": False, "error": result.message})
 

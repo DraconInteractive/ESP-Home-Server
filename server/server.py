@@ -100,6 +100,14 @@ FIRMWARE_BLOB_DIR = os.environ.get(
     "COMMAND_SERVER_FIRMWARE_BLOB_DIR",
     os.path.join(os.path.dirname(__file__), "firmware-catalog"),
 )
+R1_UPDATE_MANIFEST_PATH = os.environ.get(
+    "COMMAND_SERVER_R1_UPDATE_MANIFEST_PATH",
+    os.path.join(os.path.dirname(__file__), "r1-update.json"),
+)
+R1_APK_DIR = os.environ.get(
+    "COMMAND_SERVER_R1_APK_DIR",
+    os.path.join(os.path.dirname(__file__), "r1-apk"),
+)
 ACTION_CONFIG_PATH = os.environ.get(
     "COMMAND_SERVER_ACTION_CONFIG_PATH",
     os.path.join(os.path.dirname(__file__), "actions", "actions.json"),
@@ -401,6 +409,13 @@ def clean_version(value: str) -> str:
 def clean_filename(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "-", os.path.basename(str(value).strip()))
     return cleaned[:120] or "firmware.bin"
+
+
+def clean_sha256(value: str) -> str:
+    cleaned = str(value).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", cleaned):
+        return cleaned
+    return ""
 
 
 def clean_action_name(value: str) -> str:
@@ -744,6 +759,58 @@ def remove_firmware_catalog_entry(device_type: str, version: str | None = None) 
     shutil.rmtree(os.path.join(FIRMWARE_BLOB_DIR, cleaned_type), ignore_errors=True)
     save_firmware_catalog()
     return True
+
+
+def r1_update_manifest() -> dict[str, Any]:
+    try:
+        with open(R1_UPDATE_MANIFEST_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return {"ok": False}
+    except Exception as exc:
+        print(f"Could not load r1 update manifest: {exc}")
+        return {"ok": False}
+    if not isinstance(payload, dict) or payload.get("ok") is False:
+        return {"ok": False}
+
+    try:
+        version_code = int(payload.get("version_code"))
+    except (TypeError, ValueError):
+        return {"ok": False}
+    version_name = str(payload.get("version_name", "")).strip()[:80]
+    url = str(payload.get("url", "")).strip()[:240]
+    if version_code < 0 or not version_name or not url:
+        return {"ok": False}
+
+    manifest: dict[str, Any] = {
+        "ok": True,
+        "version_code": version_code,
+        "version_name": version_name,
+        "url": url,
+    }
+    try:
+        if payload.get("size_bytes") is not None:
+            manifest["size_bytes"] = max(0, int(payload.get("size_bytes")))
+    except (TypeError, ValueError):
+        pass
+    sha256 = clean_sha256(str(payload.get("sha256", "")))
+    if sha256:
+        manifest["sha256"] = sha256
+    notes = str(payload.get("notes", "")).strip()
+    if notes:
+        manifest["notes"] = notes[:2000]
+    return manifest
+
+
+def r1_apk_path(filename: str) -> tuple[str, str]:
+    cleaned_filename = clean_filename(unquote(filename))
+    if not cleaned_filename.lower().endswith(".apk"):
+        raise ValueError("APK filename must end with .apk")
+    path = os.path.realpath(os.path.join(R1_APK_DIR, cleaned_filename))
+    base = os.path.realpath(R1_APK_DIR)
+    if os.path.commonpath([base, path]) != base:
+        raise ValueError("APK path is outside configured directory")
+    return cleaned_filename, path
 
 
 def db_connect() -> sqlite3.Connection:
@@ -6657,6 +6724,26 @@ class CommandHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 payload = public_r1_note()
             json_response(self, 200, payload)
+            return
+        if parsed.path == "/r1-update":
+            json_response(self, 200, r1_update_manifest())
+            return
+        if parsed.path.startswith("/r1-apk/"):
+            filename = parsed.path.removeprefix("/r1-apk/")
+            try:
+                cleaned_filename, path = r1_apk_path(filename)
+            except ValueError as exc:
+                json_response(self, 404, {"ok": False, "error": str(exc)})
+                return
+            if not os.path.isfile(path):
+                json_response(self, 404, {"ok": False, "error": "APK not found"})
+                return
+            with open(path, "rb") as handle:
+                body = handle.read()
+            binary_response(self, 200, "application/vnd.android.package-archive", body, {
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="{cleaned_filename}"',
+            })
             return
         if parsed.path == "/events/recent":
             with STATE_LOCK:

@@ -24,6 +24,14 @@ DEVICE_TOKENS_PATH = os.environ.get(
     "RELAY_DEVICE_TOKENS_PATH",
     os.path.join(_RELAY_DIR, "device-tokens.json"),
 )
+R1_UPDATE_MANIFEST_PATH = os.environ.get(
+    "RELAY_R1_UPDATE_MANIFEST_PATH",
+    os.path.join(_RELAY_DIR, "r1-update.json"),
+)
+R1_APK_DIR = os.environ.get(
+    "RELAY_R1_APK_DIR",
+    os.path.join(_RELAY_DIR, "r1-apk"),
+)
 STATIC_DIR = os.path.join(_RELAY_DIR, "static")
 
 DEVICE_ENROLL_TOKEN = os.environ.get("RELAY_DEVICE_ENROLL_TOKEN", "")

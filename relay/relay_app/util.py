@@ -12,6 +12,18 @@ def clean_id(value: str, fallback: str = "") -> str:
     return cleaned[:80] or fallback
 
 
+def clean_filename(value: str, fallback: str = "file.bin") -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip().split("/")[-1])
+    return cleaned[:120] or fallback
+
+
+def clean_sha256(value: str) -> str:
+    cleaned = str(value).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", cleaned):
+        return cleaned
+    return ""
+
+
 def clean_ip_list(value: Any) -> list[str]:
     if isinstance(value, str):
         items = re.split(r"[\s,]+", value)
